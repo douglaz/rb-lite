@@ -1,0 +1,431 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROGRAM=${0##*/}
+
+DEFAULT_PROMPT=$'Read AGENTS.md if present. If a review file is provided, address the findings\nin that review. Otherwise implement the requested work. Stop when no code or\ntest changes are needed.'
+
+usage() {
+  cat <<'EOF'
+rb-lite: run a small implement/review loop in the current git repository
+
+Usage:
+  bin/rb-lite --help
+  bin/rb-lite run [options]
+
+Options:
+  --task TEXT             Task prompt to append to the implementer prompt.
+  --task-file PATH        Read task prompt from PATH.
+  --base REF              Review base ref. Default: RB_LITE_BASE or origin/master.
+  --max-rounds N          Maximum implement/review rounds. Default: RB_LITE_MAX_ROUNDS or 25.
+  --max-iters N           Maximum implementer iterations per round. Default: RB_LITE_MAX_ITERS or 25.
+  --implement-cmd CMD     Implementer shell command. Default: RB_LITE_IMPLEMENT_CMD or codex -p "$PROMPT".
+  --reviewers-file PATH   Reviewer command file. Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
+  --run-dir PATH          Store run artifacts in PATH. Default: RB_LITE_RUN_DIR or .rb-lite/runs/<id>.
+  --branch NAME           Create and switch to NAME before running.
+  -h, --help              Show this help.
+
+Environment:
+  RB_LITE_BASE            Default review base.
+  RB_LITE_MAX_ROUNDS      Default maximum review rounds.
+  RB_LITE_MAX_ITERS       Default maximum implementer iterations per round.
+  RB_LITE_IMPLEMENT_CMD   Shell command run for each implementer iteration.
+  RB_LITE_REVIEWERS_FILE  File with one reviewer shell command per non-comment line.
+  RB_LITE_RUN_DIR         Explicit run artifact directory.
+
+Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs:
+  codex review --base "$BASE"
+
+Commands receive PROMPT, BASE, REVIEW_FILE, RUN_DIR, ROUND, ITERATION, and REVIEWER_INDEX
+through the environment as applicable.
+EOF
+}
+
+die() {
+  printf '%s: %s\n' "$PROGRAM" "$*" >&2
+  exit 1
+}
+
+log_msg() {
+  local message=$1
+  printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$message" | tee -a "$LOG_FILE" >/dev/null
+}
+
+is_positive_int() {
+  [[ ${1:-} =~ ^[1-9][0-9]*$ ]]
+}
+
+repo_root() {
+  git rev-parse --show-toplevel 2>/dev/null || return 1
+}
+
+make_run_dir() {
+  local root=$1
+  local requested=$2
+  local id
+
+  if [[ -n $requested ]]; then
+    mkdir -p "$requested"
+    (cd "$requested" && pwd -P)
+    return
+  fi
+
+  id="$(date -u +'%Y%m%dT%H%M%SZ')-$$"
+  mkdir -p "$root/.rb-lite/runs/$id"
+  (cd "$root/.rb-lite/runs/$id" && pwd -P)
+}
+
+filtered_pathspec=(
+  .
+  ':(exclude).rb-lite'
+  ':(exclude).rb-lite/**'
+  ':(exclude).ralph-burning'
+  ':(exclude).ralph-burning/**'
+  ':(exclude).git/ralph-burning-live'
+  ':(exclude).git/ralph-burning-live/**'
+)
+
+fingerprint_git_state() {
+  local root=$1
+  local run_dir_abs rel
+  local -a pathspec
+
+  pathspec=("${filtered_pathspec[@]}")
+  if [[ -n ${RUN_DIR:-} ]]; then
+    run_dir_abs=$(cd "$RUN_DIR" 2>/dev/null && pwd -P || true)
+    if [[ -n $run_dir_abs && $run_dir_abs == "$root"/* ]]; then
+      rel=${run_dir_abs#"$root"/}
+      pathspec+=(":(exclude)$rel" ":(exclude)$rel/**")
+    fi
+  fi
+
+  (
+    cd "$root"
+    {
+      printf 'STATUS\n'
+      git status --porcelain=v1 --untracked-files=all -- "${pathspec[@]}" | LC_ALL=C sort
+      printf 'INDEX\n'
+      git ls-files -s -- "${pathspec[@]}" | LC_ALL=C sort
+      printf 'WORKTREE\n'
+      git ls-files -co --exclude-standard -- "${pathspec[@]}" \
+        | LC_ALL=C sort \
+        | while IFS= read -r path; do
+            [[ -f $path ]] || continue
+            printf '%s\n' "$path"
+            sha256sum -- "$path"
+          done
+    } | sha256sum | awk '{print $1}'
+  )
+}
+
+read_task_file() {
+  local path=$1
+  [[ -f $path ]] || die "task file not found: $path"
+  cat "$path"
+}
+
+build_prompt() {
+  local task=$1
+  local review_file=$2
+
+  printf '%s\n' "$DEFAULT_PROMPT"
+  if [[ -n $task ]]; then
+    printf '\nTask:\n%s\n' "$task"
+  fi
+  if [[ -n $review_file ]]; then
+    printf '\nReview file: %s\n' "$review_file"
+    printf 'Address the actionable P0/P1/P2/P3 findings from that review, then stop when no code or test changes are needed.\n'
+  fi
+}
+
+run_implementer_loop() {
+  local root=$1
+  local round=$2
+  local max_iters=$3
+  local command=$4
+  local task=$5
+  local review_file=$6
+  local iter before after prompt stdout stderr rc
+
+  iter=1
+  while (( iter <= max_iters )); do
+    before=$(fingerprint_git_state "$root")
+    prompt=$(build_prompt "$task" "$review_file")
+    stdout="$RUN_DIR/implementer-round-${round}-iter-${iter}.stdout"
+    stderr="$RUN_DIR/implementer-round-${round}-iter-${iter}.stderr"
+    log_msg "round $round implementer iteration $iter starting"
+
+    if (
+      cd "$root"
+      PROMPT=$prompt REVIEW_FILE=$review_file RUN_DIR=$RUN_DIR ROUND=$round ITERATION=$iter bash -c "$command"
+    ) >"$stdout" 2>"$stderr"; then
+      rc=0
+    else
+      rc=$?
+    fi
+
+    if (( rc != 0 )); then
+      log_msg "round $round implementer iteration $iter failed with exit $rc"
+      return "$rc"
+    fi
+
+    after=$(fingerprint_git_state "$root")
+    if [[ $before == "$after" ]]; then
+      log_msg "round $round implementer stabilized at iteration $iter"
+      return 0
+    fi
+
+    log_msg "round $round implementer changed git state at iteration $iter"
+    ((iter++))
+  done
+
+  log_msg "round $round hit max implementer iterations ($max_iters) before stabilizing"
+  return 1
+}
+
+load_reviewers() {
+  local reviewers_file=$1
+  REVIEWERS=()
+
+  if [[ -f $reviewers_file ]]; then
+    local line
+    while IFS= read -r line || [[ -n $line ]]; do
+      [[ -z ${line//[[:space:]]/} ]] && continue
+      [[ $line =~ ^[[:space:]]*# ]] && continue
+      REVIEWERS+=("$line")
+    done <"$reviewers_file"
+  fi
+
+  if ((${#REVIEWERS[@]} == 0)); then
+    REVIEWERS=('codex review --base "$BASE"')
+  fi
+}
+
+combine_review_outputs() {
+  local round=$1
+  local count=$2
+  local combined=$RUN_DIR/latest-review.md
+  local idx stdout stderr
+
+  : >"$combined"
+  for ((idx = 1; idx <= count; idx++)); do
+    stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
+    stderr="$RUN_DIR/reviewer-round-${round}-${idx}.stderr"
+    {
+      printf '## Reviewer %s stdout\n\n' "$idx"
+      if [[ -s $stdout ]]; then
+        cat "$stdout"
+      else
+        printf '(empty)\n'
+      fi
+      printf '\n\n## Reviewer %s stderr\n\n' "$idx"
+      if [[ -s $stderr ]]; then
+        cat "$stderr"
+      else
+        printf '(empty)\n'
+      fi
+      printf '\n\n'
+    } >>"$combined"
+  done
+}
+
+review_has_findings() {
+  local combined=$1
+  grep -Eq '(^|[^[:alnum:]_])P[0-3]([^[:alnum:]_]|$)' "$combined"
+}
+
+run_review_panel() {
+  local root=$1
+  local round=$2
+  local base=$3
+  local reviewers_file=$4
+  local count idx command stdout stderr pid failed rc
+  local -a pids
+
+  load_reviewers "$reviewers_file"
+  count=${#REVIEWERS[@]}
+  pids=()
+  log_msg "round $round review panel starting with $count reviewer(s)"
+
+  for ((idx = 1; idx <= count; idx++)); do
+    command=${REVIEWERS[$((idx - 1))]}
+    stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
+    stderr="$RUN_DIR/reviewer-round-${round}-${idx}.stderr"
+    (
+      cd "$root"
+      BASE=$base RUN_DIR=$RUN_DIR ROUND=$round REVIEWER_INDEX=$idx bash -c "$command"
+    ) >"$stdout" 2>"$stderr" &
+    pids+=("$!")
+  done
+
+  failed=0
+  for pid in "${pids[@]}"; do
+    if wait "$pid"; then
+      rc=0
+    else
+      rc=$?
+      failed=$rc
+    fi
+  done
+
+  combine_review_outputs "$round" "$count"
+
+  if (( failed != 0 )); then
+    log_msg "round $round review panel failed with exit $failed"
+    return "$failed"
+  fi
+
+  if review_has_findings "$RUN_DIR/latest-review.md"; then
+    log_msg "round $round review panel reported actionable findings"
+    return 2
+  fi
+
+  log_msg "round $round review panel clean"
+  return 0
+}
+
+run_command() {
+  local base=${RB_LITE_BASE:-origin/master}
+  local max_rounds=${RB_LITE_MAX_ROUNDS:-25}
+  local max_iters=${RB_LITE_MAX_ITERS:-25}
+  local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'codex -p "$PROMPT"'}
+  local reviewers_file=${RB_LITE_REVIEWERS_FILE:-.rb-lite-reviewers}
+  local requested_run_dir=${RB_LITE_RUN_DIR:-}
+  local task=
+  local task_file=
+  local branch=
+  local root round review_file rc
+
+  while (($#)); do
+    case $1 in
+      --task)
+        (($# >= 2)) || die "--task requires a value"
+        task=$2
+        shift 2
+        ;;
+      --task-file)
+        (($# >= 2)) || die "--task-file requires a value"
+        task_file=$2
+        shift 2
+        ;;
+      --base)
+        (($# >= 2)) || die "--base requires a value"
+        base=$2
+        shift 2
+        ;;
+      --max-rounds)
+        (($# >= 2)) || die "--max-rounds requires a value"
+        max_rounds=$2
+        shift 2
+        ;;
+      --max-iters)
+        (($# >= 2)) || die "--max-iters requires a value"
+        max_iters=$2
+        shift 2
+        ;;
+      --implement-cmd)
+        (($# >= 2)) || die "--implement-cmd requires a value"
+        implement_cmd=$2
+        shift 2
+        ;;
+      --reviewers-file)
+        (($# >= 2)) || die "--reviewers-file requires a value"
+        reviewers_file=$2
+        shift 2
+        ;;
+      --run-dir)
+        (($# >= 2)) || die "--run-dir requires a value"
+        requested_run_dir=$2
+        shift 2
+        ;;
+      --branch)
+        (($# >= 2)) || die "--branch requires a value"
+        branch=$2
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown run option: $1"
+        ;;
+    esac
+  done
+
+  is_positive_int "$max_rounds" || die "--max-rounds must be a positive integer"
+  is_positive_int "$max_iters" || die "--max-iters must be a positive integer"
+  [[ -n $task && -n $task_file ]] && die "use either --task or --task-file, not both"
+  if [[ -n $task_file ]]; then
+    task=$(read_task_file "$task_file")
+  fi
+
+  root=$(repo_root) || die "not in a git repository"
+  cd "$root"
+  if [[ -n $branch ]]; then
+    git switch -c "$branch"
+  fi
+
+  RUN_DIR=$(make_run_dir "$root" "$requested_run_dir")
+  LOG_FILE="$RUN_DIR/log.txt"
+  : >"$LOG_FILE"
+  log_msg "run directory: $RUN_DIR"
+  log_msg "base: $base"
+  log_msg "max rounds: $max_rounds; max implementer iterations: $max_iters"
+
+  review_file=
+  round=1
+  while (( round <= max_rounds )); do
+    if ! run_implementer_loop "$root" "$round" "$max_iters" "$implement_cmd" "$task" "$review_file"; then
+      die "implementer loop failed; see $RUN_DIR"
+    fi
+
+    if run_review_panel "$root" "$round" "$base" "$reviewers_file"; then
+      rc=0
+    else
+      rc=$?
+    fi
+
+    case $rc in
+      0)
+        printf 'rb-lite clean after %s round(s). Artifacts: %s\n' "$round" "$RUN_DIR"
+        exit 0
+        ;;
+      2)
+        review_file="$RUN_DIR/latest-review.md"
+        ((round++))
+        ;;
+      *)
+        die "review panel failed; see $RUN_DIR"
+        ;;
+    esac
+  done
+
+  die "max rounds hit before review panel was clean; see $RUN_DIR/latest-review.md"
+}
+
+main() {
+  if (($# == 0)); then
+    usage
+    exit 0
+  fi
+
+  case $1 in
+    run)
+      shift
+      run_command "$@"
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      die "unknown command: $1"
+      ;;
+  esac
+}
+
+RUN_DIR=
+LOG_FILE=
+declare -a REVIEWERS
+
+main "$@"

@@ -1,0 +1,7 @@
+id = "rb-lite"
+name = "rb-lite"
+flow = "iterative_minimal"
+prompt_reference = "prompt.md"
+prompt_hash = "41459e20c9e2a0412226e83c7dd215354e2ee01871c03443cc322876ab5e441a"
+created_at = "2026-05-01T07:13:53.984064063Z"
+status_summary = "created"

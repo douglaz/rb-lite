@@ -1,0 +1,16 @@
+{
+  "artifact_id": "run-20260501071400-plan_and_implement-c1-a1-cr1-artifact",
+  "payload_id": "run-20260501071400-plan_and_implement-c1-a1-cr1",
+  "stage_id": "plan_and_implement",
+  "created_at": "2026-05-01T07:25:15.577781632Z",
+  "content": "# Plan and Implement\n\n## Change Summary\n\n{\"change_summary\":\"Implemented rb-lite as a compact Bash-first CLI in bin/rb-lite with run-loop orchestration, git-state stability fingerprinting including staged/unstaged/untracked content, .rb-lite/.ralph-burning exclusions, configurable implementer/reviewer commands, concurrent reviewer execution, aggregated latest-review.md, remediation rounds for P0/P1/P2/P3 findings, clear help text, README, Makefile, .gitignore, and deterministic smoke tests using fake commands.\",\"steps\":[{\"order\":1,\"status\":\"completed\",\"description\":\"Inspected repository instructions and existing rb-lite files under /home/user/rb-lite.\"},{\"order\":2,\"status\":\"completed\",\"description\":\"Verified the Bash CLI supports the requested run command, flags, environment variables, prompt construction, artifact layout, reviewer aggregation, and remediation behavior.\"},{\"order\":3,\"status\":\"completed\",\"description\":\"Verified smoke tests cover implementer stabilization, remediation after P1 review output, clean review success\n\n## Steps\n\n1. [Completed] codex implementation turn\n\n## Validation Evidence\n\nNone provided.\n\n## Outstanding Risks\n\nNone identified.\n",
+  "record_kind": "stage_primary",
+  "producer": {
+    "type": "agent",
+    "requested_backend_family": "codex",
+    "requested_model_id": "gpt-5.5-high",
+    "actual_backend_family": "codex",
+    "actual_model_id": "gpt-5.5-high"
+  },
+  "completion_round": 1
+}
