@@ -1,0 +1,16 @@
+{
+  "artifact_id": "run-20260501071400-final_review-reviewer-1-c1-a1-cr1-artifact",
+  "payload_id": "run-20260501071400-final_review-reviewer-1-c1-a1-cr1-payload",
+  "stage_id": "final_review",
+  "created_at": "2026-05-01T07:28:07.770501810Z",
+  "content": "# Final Review Proposal\n**Producer:** agent:codex/gpt-5.5-xhigh\n\n## Summary\n\nFound one correctness issue in the review-panel exit-code handling. `bash -n bin/rb-lite` and `bash tests/smoke.sh` passed; `make test` could not be run because `make` is not installed in this environment.\n\n## Amendments\n\n1. `bin/rb-lite` uses exit code `2` both as the internal sentinel for \"review panel reported actionable findings\" and as a possible raw reviewer failure code. In `run_review_panel`, any failed reviewer returns its original code at lines 273-275; then `run_command` treats code `2` as review findings at lines 394-397. A reviewer command that exits `2` is therefore not reported as an operational reviewer failure and can trigger another implementer round or end with the misleading \"max rounds hit\" error. Map reviewer command failures to a non-sentinel code, or make the findings state distinct from process exit codes before dispatching in `run_command`.\n   Classification: fix_current_bead\n   Rationale: Reviewer command failures must be nonzero operational errors; continuing as if there were actionable findings can feed empty or partial review output into remediation and hides the actual failing reviewer.\n",
+  "record_kind": "stage_supporting",
+  "producer": {
+    "type": "agent",
+    "requested_backend_family": "codex",
+    "requested_model_id": "gpt-5.5-xhigh",
+    "actual_backend_family": "codex",
+    "actual_model_id": "gpt-5.5-xhigh"
+  },
+  "completion_round": 1
+}

@@ -1,0 +1,16 @@
+{
+  "artifact_id": "run-20260501071400-final_review-vote-1-c1-a1-cr1-artifact",
+  "payload_id": "run-20260501071400-final_review-vote-1-c1-a1-cr1-payload",
+  "stage_id": "final_review",
+  "created_at": "2026-05-01T07:30:41.159603499Z",
+  "content": "# Final Review Votes\n**Producer:** agent:codex/gpt-5.5-xhigh\n\n## Summary\n\nAll three amendments identify real correctness issues in the current Bash implementation. The first two are duplicate reports of the same exit-code collision, and the third is a real path-safety bug in the fingerprinting logic.\n\n## Votes\n\n- `fr-1-43b7154c`: Accept\n  Valid. `run_review_panel` returns raw reviewer exit statuses and also uses `2` as the actionable-findings sentinel, while `run_command` treats any `2` as findings. A reviewer tool exiting `2` is therefore misclassified as a clean operational run with findings, which can cause incorrect retries and misleading max-rounds failures.\n- `fr-1-068f5d68`: Accept\n  Valid. This is the same exit-code collision as fr-1-43b7154c, with an accurate failure mode: a reviewer failure status of `2` bypasses the catch-all failure path. The fix should make the findings signal distinct from raw process failures, either with a non-conflicting sentinel or an explicit state channel.\n- `fr-1-959943d5`: Accept\n  Valid. `git ls-files` without `-z` can C-quote paths containing tabs, newlines, quotes, or other special bytes. The subsequent `[[ -f $path ]]` and `sha256sum -- \"$path\"` then operate on the quoted display string rather than the actual path, causing such files to be skipped from the worktree content hash. NUL-delimited path handling is the correct robust fix.\n",
+  "record_kind": "stage_supporting",
+  "producer": {
+    "type": "agent",
+    "requested_backend_family": "codex",
+    "requested_model_id": "gpt-5.5-xhigh",
+    "actual_backend_family": "codex",
+    "actual_model_id": "gpt-5.5-xhigh"
+  },
+  "completion_round": 1
+}

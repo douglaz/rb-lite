@@ -2,29 +2,88 @@
   "active_run": {
     "run_id": "run-20260501071400",
     "stage_cursor": {
-      "stage": "final_review",
+      "stage": "plan_and_implement",
       "cycle": 1,
       "attempt": 1,
-      "completion_round": 1
+      "completion_round": 2
     },
     "started_at": "2026-05-01T07:14:00.571371870Z",
     "prompt_hash_at_cycle_start": "41459e20c9e2a0412226e83c7dd215354e2ee01871c03443cc322876ab5e441a",
     "prompt_hash_at_stage_start": "41459e20c9e2a0412226e83c7dd215354e2ee01871c03443cc322876ab5e441a",
     "qa_iterations_current_cycle": 0,
     "review_iterations_current_cycle": 0,
-    "final_review_restart_count": 0
+    "final_review_restart_count": 1
   },
   "status": "running",
   "cycle_history": [],
-  "completion_rounds": 1,
+  "completion_rounds": 2,
   "max_completion_rounds": 25,
   "rollback_point_meta": {
     "last_rollback_id": null,
     "rollback_count": 0
   },
   "amendment_queue": {
-    "pending": [],
+    "pending": [
+      {
+        "amendment_id": "fr-1-43b7154c",
+        "source_stage": "final_review",
+        "source_cycle": 1,
+        "source_completion_round": 1,
+        "body": "`bin/rb-lite` uses exit code `2` both as the internal sentinel for \"review panel reported actionable findings\" and as a possible raw reviewer failure code. In `run_review_panel`, any failed reviewer returns its original code at lines 273-275; then `run_command` treats code `2` as review findings at lines 394-397. A reviewer command that exits `2` is therefore not reported as an operational reviewer failure and can trigger another implementer round or end with the misleading \"max rounds hit\" error. Map reviewer command failures to a non-sentinel code, or make the findings state distinct from process exit codes before dispatching in `run_command`.",
+        "created_at": "2026-05-01T07:31:06.322580728Z",
+        "batch_sequence": 1,
+        "source": "workflow_stage",
+        "dedup_key": "a8f5e0699999233d2a75ae214c11c410d679238b856785f58e04634710324ddb",
+        "classification": "fix_current_bead"
+      },
+      {
+        "amendment_id": "fr-1-068f5d68",
+        "source_stage": "final_review",
+        "source_cycle": 1,
+        "source_completion_round": 1,
+        "body": "bin/rb-lite:273-285 and 389-401 — `run_review_panel` overloads exit code 2: it `return 2` to signal 'actionable findings present', but it also `return \"$failed\"` when any reviewer fails. If a reviewer process exits with status 2 (a real tool failure with no P[0-3] in its output), `run_command` matches the `2)` case in its `case $rc in ...` switch and treats the failure as 'findings present', triggering another implementer round instead of dying. The loop then burns through `--max-rounds` re-running the implementer against an empty `latest-review.md` before finally erroring out. Use a non-conflicting sentinel — e.g. return 100 (or write a flag file) for 'findings present', and let any non-zero reviewer failure stay non-zero in `run_command`'s catch-all arm.",
+        "created_at": "2026-05-01T07:31:06.322585767Z",
+        "batch_sequence": 2,
+        "source": "workflow_stage",
+        "dedup_key": "ed5a3f538ea4708ab85f9d5491dab8d1a0fc8cb89147240200c30cb86d20dc0c",
+        "classification": "fix_current_bead"
+      },
+      {
+        "amendment_id": "fr-1-959943d5",
+        "source_stage": "final_review",
+        "source_cycle": 1,
+        "source_completion_round": 1,
+        "body": "bin/rb-lite:109-117 — `fingerprint_git_state` runs `git ls-files -co --exclude-standard -- \"${pathspec[@]}\"` (no `-z`) and pipes paths into `while IFS= read -r path; do [[ -f $path ]] || continue; ...; sha256sum -- \"$path\"; done`. Without `-z`, git emits paths containing tabs, newlines, quotes, or other non-printable bytes in C-quoted form (e.g. `\"a\\tb.txt\"`). The `[[ -f $path ]]` test then checks for the literal quoted string, which is not a real file, so the entry is silently skipped and that file's worktree contents never enter the hash. Modifications to such files between iterations would not change the fingerprint, so the implementer loop could declare stability prematurely. Switch to NUL-delimited parsing: `git ls-files -z -co --exclude-standard -- \"${pathspec[@]}\" | LC_ALL=C sort -z | while IFS= read -r -d '' path; do ...; done` and feed `sha256sum -z` or otherwise hash the bytes safely.",
+        "created_at": "2026-05-01T07:31:06.322599403Z",
+        "batch_sequence": 3,
+        "source": "workflow_stage",
+        "dedup_key": "e957285717db095b0064d920abee593363128a3966063ceafda989bf49f988f9",
+        "classification": "fix_current_bead"
+      }
+    ],
     "processed_count": 0
   },
-  "status_summary": "running: completed Plan and Implement, next Final Review"
+  "status_summary": "running: final review restart round 2 -> Plan and Implement",
+  "last_stage_resolution_snapshot": {
+    "stage_id": "final_review",
+    "resolved_at": "2026-05-01T07:25:15.729886546Z",
+    "final_review_reviewers": [
+      {
+        "backend_family": "codex",
+        "model_id": "gpt-5.5-xhigh"
+      },
+      {
+        "backend_family": "claude",
+        "model_id": "claude-opus-4-7-max"
+      },
+      {
+        "backend_family": "codex",
+        "model_id": "gpt-5.3-codex-spark-xhigh"
+      }
+    ],
+    "final_review_arbiter": {
+      "backend_family": "codex",
+      "model_id": "gpt-5.5-xhigh"
+    }
+  }
 }
