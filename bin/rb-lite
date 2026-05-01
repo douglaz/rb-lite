@@ -107,12 +107,12 @@ fingerprint_git_state() {
       printf 'INDEX\n'
       git ls-files -s -- "${pathspec[@]}" | LC_ALL=C sort
       printf 'WORKTREE\n'
-      git ls-files -co --exclude-standard -- "${pathspec[@]}" \
-        | LC_ALL=C sort \
-        | while IFS= read -r path; do
+      git ls-files -z -co --exclude-standard -- "${pathspec[@]}" \
+        | LC_ALL=C sort -z \
+        | while IFS= read -r -d '' path; do
             [[ -f $path ]] || continue
-            printf '%s\n' "$path"
-            sha256sum -- "$path"
+            printf 'PATH\0%s\0HASH\0' "$path"
+            sha256sum -- "$path" | awk '{printf "%s\0", $1}'
           done
     } | sha256sum | awk '{print $1}'
   )
@@ -242,6 +242,8 @@ run_review_panel() {
   local count idx command stdout stderr pid failed rc
   local -a pids
 
+  REVIEW_PANEL_RESULT=failed
+  REVIEW_PANEL_FAILURE_EXIT=0
   load_reviewers "$reviewers_file"
   count=${#REVIEWERS[@]}
   pids=()
@@ -272,15 +274,18 @@ run_review_panel() {
 
   if (( failed != 0 )); then
     log_msg "round $round review panel failed with exit $failed"
-    return "$failed"
+    REVIEW_PANEL_FAILURE_EXIT=$failed
+    return 1
   fi
 
   if review_has_findings "$RUN_DIR/latest-review.md"; then
     log_msg "round $round review panel reported actionable findings"
-    return 2
+    REVIEW_PANEL_RESULT=findings
+    return 0
   fi
 
   log_msg "round $round review panel clean"
+  REVIEW_PANEL_RESULT=clean
   return 0
 }
 
@@ -380,23 +385,21 @@ run_command() {
       die "implementer loop failed; see $RUN_DIR"
     fi
 
-    if run_review_panel "$root" "$round" "$base" "$reviewers_file"; then
-      rc=0
-    else
-      rc=$?
+    if ! run_review_panel "$root" "$round" "$base" "$reviewers_file"; then
+      die "review panel failed with exit $REVIEW_PANEL_FAILURE_EXIT; see $RUN_DIR"
     fi
 
-    case $rc in
-      0)
+    case $REVIEW_PANEL_RESULT in
+      clean)
         printf 'rb-lite clean after %s round(s). Artifacts: %s\n' "$round" "$RUN_DIR"
         exit 0
         ;;
-      2)
+      findings)
         review_file="$RUN_DIR/latest-review.md"
         ((round++))
         ;;
       *)
-        die "review panel failed; see $RUN_DIR"
+        die "review panel ended in unexpected state '$REVIEW_PANEL_RESULT'; see $RUN_DIR"
         ;;
     esac
   done
@@ -426,6 +429,8 @@ main() {
 
 RUN_DIR=
 LOG_FILE=
+REVIEW_PANEL_RESULT=
+REVIEW_PANEL_FAILURE_EXIT=0
 declare -a REVIEWERS
 
 main "$@"

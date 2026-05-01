@@ -1,0 +1,16 @@
+{
+  "artifact_id": "run-20260501071400-plan_and_implement-c1-a1-cr2-artifact",
+  "payload_id": "run-20260501071400-plan_and_implement-c1-a1-cr2",
+  "stage_id": "plan_and_implement",
+  "created_at": "2026-05-01T07:33:44.210774376Z",
+  "content": "# Plan and Implement\n\n## Change Summary\n\n{\"change_summary\":\"Implemented the pending amendments in the existing Bash CLI: review findings are no longer encoded as exit code 2, so a reviewer process that exits 2 is treated as an operational failure; git-state fingerprinting now reads tracked/untracked paths with NUL-delimited `git ls-files -z` and hashes file contents safely for paths containing tabs or other quoted characters. Added deterministic smoke coverage for both regressions: reviewer exit 2 fails immediately without burning review rounds, and an untracked path containing a tab affects implementer stability detection.\",\"outstanding_risks\":[\"`make test` could not be invoked because `make` is not installed in this environment; the same commands from the Makefile were run directly instead.\",\"`nix build` was not run because this repository has no `flake.nix`.\"],\"steps\":[{\"description\":\"Inspected `bin/rb-lite`, current tests, and the active git diff to confirm the pending amendments and avoid touching unrelated `.ralph-burni\n\n## Steps\n\n1. [Completed] codex implementation turn\n\n## Validation Evidence\n\nNone provided.\n\n## Outstanding Risks\n\nNone identified.\n",
+  "record_kind": "stage_primary",
+  "producer": {
+    "type": "agent",
+    "requested_backend_family": "codex",
+    "requested_model_id": "gpt-5.5-high",
+    "actual_backend_family": "codex",
+    "actual_model_id": "gpt-5.5-high"
+  },
+  "completion_round": 2
+}

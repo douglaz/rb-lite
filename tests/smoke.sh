@@ -171,6 +171,30 @@ fi
   assert_equals 2 "$(cat "$repo/.rb-lite/implementer-count")" "untracked stability count"
 }
 
+test_quoted_untracked_paths_affect_stability() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+path=$'"'"'quoted	path.txt'"'"'
+if (( count == 1 )); then
+  printf "untracked with tab\n" >"$path"
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "Clean\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "quoted untracked" --max-rounds 1 --max-iters 3 \
+    --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out
+
+  assert_equals 2 "$(cat "$repo/.rb-lite/implementer-count")" "quoted untracked stability count"
+}
+
 test_rb_lite_artifacts_do_not_affect_stability() {
   local repo
   repo=$(new_repo)
@@ -228,14 +252,39 @@ test_reviewer_config_aggregates_multiple_outputs() {
   assert_file_contains "$run_dir/latest-review.md" 'reviewer two clean'
 }
 
+test_reviewer_exit_two_is_operational_failure() {
+  local repo status
+  repo=$(new_repo)
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+'
+  write_fake "$repo" failing-reviewer 'printf "tool failed without findings\n" >&2; exit 2'
+  write_reviewers "$repo" failing-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "reviewer fails" --max-rounds 2 --max-iters 1 \
+    --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  [[ $status != 0 ]] || fail "reviewer exit 2 should fail rb-lite"
+  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "reviewer failure implementer count"
+  assert_file_contains /tmp/rb-lite-test.err 'review panel failed with exit 2'
+}
+
 mkdir -p "$TMP_ROOT"
 
 test_implementer_stops_when_stable
 test_p1_review_triggers_remediation_round
 test_clean_review_exits_successfully
 test_untracked_files_affect_stability
+test_quoted_untracked_paths_affect_stability
 test_rb_lite_artifacts_do_not_affect_stability
 test_custom_run_dir_does_not_affect_stability
 test_reviewer_config_aggregates_multiple_outputs
+test_reviewer_exit_two_is_operational_failure
 
 printf 'ok - smoke tests passed\n'
