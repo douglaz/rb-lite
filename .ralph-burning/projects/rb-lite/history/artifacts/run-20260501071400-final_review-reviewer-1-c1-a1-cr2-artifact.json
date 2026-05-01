@@ -1,0 +1,16 @@
+{
+  "artifact_id": "run-20260501071400-final_review-reviewer-1-c1-a1-cr2-artifact",
+  "payload_id": "run-20260501071400-final_review-reviewer-1-c1-a1-cr2-payload",
+  "stage_id": "final_review",
+  "created_at": "2026-05-01T07:39:23.519682495Z",
+  "content": "# Final Review Proposal\n**Producer:** agent:codex/gpt-5.5-xhigh\n\n## Summary\n\nFound one correctness gap in the stability fingerprint. `bash -n bin/rb-lite` and `bash tests/smoke.sh` pass; `make test` could not be run because `make` is not installed in this environment, and no flake is present for `nix build`.\n\n## Amendments\n\n1. `bin/rb-lite` does not fingerprint symlink worktree content correctly. At line 113 it skips any path where `[[ -f $path ]]` is false, so dangling symlinks and symlinks to directories have no worktree content in the fingerprint; at line 115 it hashes symlink targets via `sha256sum` rather than the symlink text Git stores. If an implementer retargets an already-dirty symlink, `git status` and the index can remain unchanged while the actual git diff changes, causing the loop to declare stability too early. Hash symlink contents explicitly, for example by detecting `[[ -L $path ]]` and hashing `readlink \"$path\"` with an unambiguous prefix instead of following or skipping the link.\n   Classification: fix_current_bead\n   Rationale: The core rb-lite contract is to keep invoking the implementer until tracked, staged, unstaged, and untracked git state stabilizes. Missing symlink content leaves a real class of git diffs invisible to the stability check.\n",
+  "record_kind": "stage_supporting",
+  "producer": {
+    "type": "agent",
+    "requested_backend_family": "codex",
+    "requested_model_id": "gpt-5.5-xhigh",
+    "actual_backend_family": "codex",
+    "actual_model_id": "gpt-5.5-xhigh"
+  },
+  "completion_round": 2
+}

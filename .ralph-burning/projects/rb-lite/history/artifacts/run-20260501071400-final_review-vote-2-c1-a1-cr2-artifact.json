@@ -1,0 +1,16 @@
+{
+  "artifact_id": "run-20260501071400-final_review-vote-2-c1-a1-cr2-artifact",
+  "payload_id": "run-20260501071400-final_review-vote-2-c1-a1-cr2-payload",
+  "stage_id": "final_review",
+  "created_at": "2026-05-01T07:43:57.038532113Z",
+  "content": "# Final Review Votes\n**Producer:** agent:claude/claude-opus-4-7-max\n\n## Summary\n\nVerified the cited code at bin/rb-lite:113-115. The fingerprint's worktree section skips symlinks via `[[ -f $path ]]` (which resolves through the symlink) and, for symlinks pointing to regular files, hashes target content via `sha256sum` rather than the symlink text Git stores. Combined with `git status --porcelain=v1` and `git ls-files -s` being insensitive to symlink-target retargeting in the worktree, this lets a dirty-symlink retarget produce an unchanged fingerprint while the actual git diff changes — a real correctness bug in stability detection. The proposed fix using `[[ -L $path ]]` + `readlink` with a type prefix is a sound, minimal remedy.\n\n## Votes\n\n- `fr-2-57793a7e`: Accept\n  Confirmed against bin/rb-lite:113-115. `-f` resolves symlinks (so dangling and dir-pointing symlinks are silently dropped) and `sha256sum -- \"$path\"` follows the link to hash target content, not the symlink text Git records. `git status --porcelain=v1` emits only status code + filename, and `git ls-files -s` reflects the index, so retargeting an already-dirty tracked symlink can leave the entire fingerprint unchanged while the git diff differs — causing the implement loop to declare stability prematurely. The suggested fix (detect `-L`, hash `readlink \"$path\"` with an unambiguous prefix) is small, correct, and self-contained. Per voter instructions, a real correctness defect should not be dismissed as rare/theoretical.\n",
+  "record_kind": "stage_supporting",
+  "producer": {
+    "type": "agent",
+    "requested_backend_family": "claude",
+    "requested_model_id": "claude-opus-4-7-max",
+    "actual_backend_family": "claude",
+    "actual_model_id": "claude-opus-4-7-max"
+  },
+  "completion_round": 2
+}
