@@ -1,0 +1,20 @@
+# AGENTS.md
+
+This repository is intentionally small. Keep the implementation Bash-first and
+avoid recreating ralph-burning's durable orchestration stack.
+
+## Project Norms
+
+- Implement `rb-lite` as a small Bash CLI, not Rust.
+- Do not add rollback, checkpoint commit, hard reset, worktree recovery, daemon,
+  PR automation, or persistent project/run database features.
+- The useful scope is: run an implementer loop until the git diff stabilizes,
+  run a lightweight final review panel, feed actionable review findings back
+  into the next implementer round, and stop when clean or capped.
+- Prefer visible files and simple commands over hidden state. Runtime logs may
+  live under `.rb-lite/`, and `.rb-lite/` must be ignored by git.
+- Keep tests deterministic by using fake `codex`/reviewer commands. Do not rely
+  on live model credentials in tests.
+- Verification should include the Bash smoke tests and `nix build` if a flake is
+  present. Do not introduce a Rust crate or Cargo workflow.
+
