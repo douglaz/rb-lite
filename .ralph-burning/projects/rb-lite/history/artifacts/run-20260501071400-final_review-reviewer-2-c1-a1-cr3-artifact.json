@@ -1,0 +1,16 @@
+{
+  "artifact_id": "run-20260501071400-final_review-reviewer-2-c1-a1-cr3-artifact",
+  "payload_id": "run-20260501071400-final_review-reviewer-2-c1-a1-cr3-payload",
+  "stage_id": "final_review",
+  "created_at": "2026-05-01T07:55:56.652058613Z",
+  "content": "# Final Review Proposal\n**Producer:** agent:claude/claude-opus-4-7-max\n\n## Summary\n\nReviewed bin/rb-lite (442 lines), tests/smoke.sh (323 lines, 10 deterministic tests), README.md, Makefile, AGENTS.md, and .gitignore against the project spec. The implementation correctly satisfies all stated requirements: implement/review loop with git-state fingerprinting (tracked/staged/unstaged/untracked, symlinks, special chars), proper exclusion of .git/, .rb-lite/, .ralph-burning/, and custom run-dir; concurrent reviewer panel with per-reviewer artifacts and combined latest-review.md; P[0-3] severity detection via non-word-bounded regex; configurable implementer/reviewer commands, max-rounds, max-iters, base ref, and run-dir via flags and RB_LITE_* env vars; clean exit codes (0 clean, non-zero on any failure); no prohibited features (no commits, resets, daemons, PR automation, durable database). All 10 smoke tests pass. Help output is complete. Verified end-to-end behavior of implementer failure propagation and file-deletion stability detection. No real bugs, safety issues, correctness gaps, or significant maintainability risks identified.\n\n## Amendments\n\nNone.\n",
+  "record_kind": "stage_supporting",
+  "producer": {
+    "type": "agent",
+    "requested_backend_family": "claude",
+    "requested_model_id": "claude-opus-4-7-max",
+    "actual_backend_family": "claude",
+    "actual_model_id": "claude-opus-4-7-max"
+  },
+  "completion_round": 3
+}
