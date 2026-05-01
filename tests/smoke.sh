@@ -195,6 +195,38 @@ fi
   assert_equals 2 "$(cat "$repo/.rb-lite/implementer-count")" "quoted untracked stability count"
 }
 
+test_dirty_symlink_retarget_affects_stability() {
+  local repo
+  repo=$(new_repo)
+  (
+    cd "$repo"
+    ln -s committed-target tracked-link
+    git add tracked-link
+    git commit -qm add-symlink
+    rm -f tracked-link
+    ln -s dirty-target-a tracked-link
+  )
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  rm -f tracked-link
+  ln -s dirty-target-b tracked-link
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "Clean\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "retarget symlink" --max-rounds 1 --max-iters 3 \
+    --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out
+
+  assert_equals 2 "$(cat "$repo/.rb-lite/implementer-count")" "dirty symlink retarget stability count"
+}
+
 test_rb_lite_artifacts_do_not_affect_stability() {
   local repo
   repo=$(new_repo)
@@ -282,6 +314,7 @@ test_p1_review_triggers_remediation_round
 test_clean_review_exits_successfully
 test_untracked_files_affect_stability
 test_quoted_untracked_paths_affect_stability
+test_dirty_symlink_retarget_affects_stability
 test_rb_lite_artifacts_do_not_affect_stability
 test_custom_run_dir_does_not_affect_stability
 test_reviewer_config_aggregates_multiple_outputs

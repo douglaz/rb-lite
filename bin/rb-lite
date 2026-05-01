@@ -110,9 +110,15 @@ fingerprint_git_state() {
       git ls-files -z -co --exclude-standard -- "${pathspec[@]}" \
         | LC_ALL=C sort -z \
         | while IFS= read -r -d '' path; do
-            [[ -f $path ]] || continue
-            printf 'PATH\0%s\0HASH\0' "$path"
-            sha256sum -- "$path" | awk '{printf "%s\0", $1}'
+            printf 'PATH\0%s\0' "$path"
+            if [[ -L $path ]]; then
+              printf 'TYPE\0SYMLINK\0TARGET\0%s\0' "$(readlink -- "$path")"
+            elif [[ -f $path ]]; then
+              printf 'TYPE\0FILE\0HASH\0'
+              sha256sum -- "$path" | awk '{printf "%s\0", $1}'
+            else
+              printf 'TYPE\0OTHER\0'
+            fi
           done
     } | sha256sum | awk '{print $1}'
   )

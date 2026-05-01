@@ -1,0 +1,16 @@
+{
+  "artifact_id": "run-20260501071400-plan_and_implement-c1-a1-cr3-artifact",
+  "payload_id": "run-20260501071400-plan_and_implement-c1-a1-cr3",
+  "stage_id": "plan_and_implement",
+  "created_at": "2026-05-01T07:46:05.734646063Z",
+  "content": "# Plan and Implement\n\n## Change Summary\n\n{\"change_summary\":\"Implemented the pending symlink fingerprint remediation in bin/rb-lite: worktree fingerprinting now records every candidate path with an explicit type, hashes regular files, fingerprints symlink targets using readlink without following the link, and records other path types instead of silently skipping them. Added deterministic smoke coverage proving that retargeting an already-dirty tracked symlink causes another implementer iteration before stability is declared.\",\"outstanding_risks\":[\"make test could not be invoked directly because make is not installed in this environment; the equivalent Makefile commands were run manually and passed.\",\"nix build was not run because this repository does not contain flake.nix.\",\"Existing .ralph-burning runtime state files are modified in the working tree and were intentionally left untouched as live orchestration state.\"],\"steps\":[{\"description\":\"Inspected the current rb-lite CLI, smoke tests, and git status to identify the pendin\n\n## Steps\n\n1. [Completed] codex implementation turn\n\n## Validation Evidence\n\nNone provided.\n\n## Outstanding Risks\n\nNone identified.\n",
+  "record_kind": "stage_primary",
+  "producer": {
+    "type": "agent",
+    "requested_backend_family": "codex",
+    "requested_model_id": "gpt-5.5-high",
+    "actual_backend_family": "codex",
+    "actual_model_id": "gpt-5.5-high"
+  },
+  "completion_round": 3
+}
