@@ -19,7 +19,8 @@ Options:
   --base REF              Review base ref. Default: RB_LITE_BASE or origin/master.
   --max-rounds N          Maximum implement/review rounds. Default: RB_LITE_MAX_ROUNDS or 25.
   --max-iters N           Maximum implementer iterations per round. Default: RB_LITE_MAX_ITERS or 25.
-  --implement-cmd CMD     Implementer shell command. Default: RB_LITE_IMPLEMENT_CMD or codex -p "$PROMPT".
+  --implement-cmd CMD     Implementer shell command. Default: RB_LITE_IMPLEMENT_CMD or
+                          codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT".
   --reviewers-file PATH   Reviewer command file. Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
   --run-dir PATH          Store run artifacts in PATH. Default: RB_LITE_RUN_DIR or .rb-lite/runs/<id>.
   --branch NAME           Create and switch to NAME before running.
@@ -299,7 +300,7 @@ run_command() {
   local base=${RB_LITE_BASE:-origin/master}
   local max_rounds=${RB_LITE_MAX_ROUNDS:-25}
   local max_iters=${RB_LITE_MAX_ITERS:-25}
-  local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'codex -p "$PROMPT"'}
+  local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"'}
   local reviewers_file=${RB_LITE_REVIEWERS_FILE:-.rb-lite-reviewers}
   local requested_run_dir=${RB_LITE_RUN_DIR:-}
   local task=

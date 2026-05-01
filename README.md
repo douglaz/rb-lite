@@ -22,8 +22,13 @@ Artifacts are written under `.rb-lite/runs/<id>/` by default:
 - `latest-review.md`
 - `log.txt`
 
-The default implementer command is `codex -p "$PROMPT"`. Override it with
-`--implement-cmd` or `RB_LITE_IMPLEMENT_CMD`.
+The default implementer command is:
+
+```bash
+codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"
+```
+
+Override it with `--implement-cmd` or `RB_LITE_IMPLEMENT_CMD`.
 
 The default reviewer is `codex review --base "$BASE"`. To use a panel, create a
 `.rb-lite-reviewers` file with one shell command per line. Blank lines and lines
@@ -43,8 +48,11 @@ Run `bin/rb-lite --help` for the full option list.
 ## Tests
 
 ```bash
-make test
+just test
 ```
 
 The smoke tests use fake implementer and reviewer commands on `PATH`; they do
 not require live model credentials.
+
+Use `nix develop` to enter a shell with `just` and the basic development tools.
+Run `just check` for the full local gate, including `nix flake check`.

@@ -23,8 +23,9 @@ The implementation should live in `~/rb-lite`.
 ## Implementation Hints
 
 - Create an executable Bash CLI at `bin/rb-lite`.
-- Add a short `README.md`, a `Makefile` with `make test`, deterministic smoke
-  tests under `tests/`, and a `.gitignore` that ignores `.rb-lite/`.
+- Add a short `README.md`, a `justfile` with `just test`, a `flake.nix`,
+  deterministic smoke tests under `tests/`, and a `.gitignore` that ignores
+  `.rb-lite/`.
 - Use `set -Eeuo pipefail`, arrays, quoted variables, and predictable temp/log
   paths.
 - Default to operating on the current git repository.
@@ -40,8 +41,9 @@ The implementation should live in `~/rb-lite`.
 - Detect implementer stability by fingerprinting git state before and after an
   implementer invocation. Include tracked, staged, unstaged, and untracked file
   content. Exclude `.git/`, `.rb-lite/`, and `.ralph-burning/`.
-- The default implementer command should be `codex -p "$PROMPT"`, but make it
-  configurable without editing the script.
+- The default implementer command should be
+  `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"`,
+  but make it configurable without editing the script.
 - The default implementer prompt should say:
 
 ```text
@@ -112,8 +114,8 @@ Also ignore `.git/ralph-burning-live/` and `.rb-lite/` runtime output.
 ## Acceptance Criteria
 
 - `bin/rb-lite --help` works.
-- `make test` passes and runs deterministic tests without live model credentials.
-- `nix build` passes if a flake is added.
+- `just test` passes and runs deterministic tests without live model credentials.
+- `nix build` and `nix flake check` pass.
 - The project remains Bash-only. Do not add Rust or Cargo just to satisfy a
   generic Rust workflow.
 - The implementation contains no rollback, checkpoint commit, hard reset,

@@ -15,6 +15,6 @@ avoid recreating ralph-burning's durable orchestration stack.
   live under `.rb-lite/`, and `.rb-lite/` must be ignored by git.
 - Keep tests deterministic by using fake `codex`/reviewer commands. Do not rely
   on live model credentials in tests.
-- Verification should include the Bash smoke tests and `nix build` if a flake is
-  present. Do not introduce a Rust crate or Cargo workflow.
-
+- Use `just` for local task recipes instead of `make`.
+- Verification should include `just test`, `nix build`, and `nix flake check`.
+  Do not introduce a Rust crate or Cargo workflow.

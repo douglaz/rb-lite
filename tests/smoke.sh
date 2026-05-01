@@ -53,7 +53,7 @@ write_fake() {
   local body=$3
   mkdir -p "$repo/fakes"
   {
-    printf '#!/usr/bin/env bash\n'
+    printf '#!%s\n' "${BASH:-/usr/bin/env bash}"
     printf 'set -Eeuo pipefail\n'
     printf '%s\n' "$body"
   } >"$repo/fakes/$name"
@@ -146,6 +146,51 @@ test_clean_review_exits_successfully() {
     --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out
 
   assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+}
+
+test_default_implementer_uses_noninteractive_codex_exec() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" codex '
+mkdir -p .rb-lite
+printf "%s\n" "$#" >.rb-lite/codex-argc
+printf "%s\n" "$1" >.rb-lite/codex-arg1
+printf "%s\n" "$2" >.rb-lite/codex-arg2
+printf "%s\n" "$3" >.rb-lite/codex-arg3
+printf "%s\n" "$4" >.rb-lite/codex-prompt
+'
+  write_fake "$repo" fake-reviewer 'printf "Clean review\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "default prompt marker" --max-rounds 1 --max-iters 1 \
+    >/tmp/rb-lite-test.out
+
+  assert_equals 4 "$(cat "$repo/.rb-lite/codex-argc")" "default codex arg count"
+  assert_equals exec "$(cat "$repo/.rb-lite/codex-arg1")" "default codex subcommand"
+  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-arg2")" "default codex approval flag"
+  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-arg3")" "default codex repo flag"
+  assert_file_contains "$repo/.rb-lite/codex-prompt" 'Read AGENTS\.md'
+  assert_file_contains "$repo/.rb-lite/codex-prompt" 'default prompt marker'
+}
+
+test_env_implement_cmd_override_still_wins() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" codex 'printf "default codex should not run\n" >&2; exit 44'
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+printf "env override\n" >.rb-lite/env-override
+'
+  write_fake "$repo" fake-reviewer 'printf "Clean review\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_IMPLEMENT_CMD='fake-implementer' "$repo/bin/rb-lite" run \
+      --task "env override" --max-rounds 1 --max-iters 1
+  ) >/tmp/rb-lite-test.out
+
+  assert_file_contains "$repo/.rb-lite/env-override" 'env override'
 }
 
 test_untracked_files_affect_stability() {
@@ -312,6 +357,8 @@ mkdir -p "$TMP_ROOT"
 test_implementer_stops_when_stable
 test_p1_review_triggers_remediation_round
 test_clean_review_exits_successfully
+test_default_implementer_uses_noninteractive_codex_exec
+test_env_implement_cmd_override_still_wins
 test_untracked_files_affect_stability
 test_quoted_untracked_paths_affect_stability
 test_dirty_symlink_retarget_affects_stability
