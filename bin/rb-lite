@@ -207,6 +207,7 @@ run_implementer_loop() {
           else
             prev_session=${BASH_REMATCH[0]}
           fi
+          break
         fi
       done <"$stderr"
     fi

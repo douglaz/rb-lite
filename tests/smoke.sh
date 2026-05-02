@@ -258,6 +258,32 @@ fi
   assert_file_contains "$repo/.rb-lite/session-env.txt" '^2\.1:$'
 }
 
+test_implementer_session_resume_picks_first_match() {
+  local repo first second
+  repo=$(new_repo)
+  first=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+  second=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+printf "%s.%s:%s\n" "$ROUND" "$ITERATION" "${RB_LITE_PREV_SESSION:-}" >>.rb-lite/session-env.txt
+printf "session id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n" >&2
+printf "echoed prompt: session id: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\n" >&2
+if [[ $ROUND == 1 && $ITERATION == 1 ]]; then
+  printf "changed once\n" >changed.txt
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings.\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "first match wins" --max-rounds 1 --max-iters 2 \
+    --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out
+
+  assert_file_contains "$repo/.rb-lite/session-env.txt" "^1\\.2:$first$"
+  if grep -q "$second" "$repo/.rb-lite/session-env.txt"; then
+    fail "iter 2 captured the echoed/forged session id instead of the real header"
+  fi
+}
+
 test_env_implement_cmd_override_still_wins() {
   local repo
   repo=$(new_repo)
@@ -634,6 +660,7 @@ test_p1_review_triggers_remediation_round
 test_clean_review_exits_successfully
 test_default_implementer_uses_noninteractive_codex_exec
 test_implementer_session_resume_resets_at_round_boundary
+test_implementer_session_resume_picks_first_match
 test_env_implement_cmd_override_still_wins
 test_untracked_files_affect_stability
 test_quoted_untracked_paths_affect_stability
