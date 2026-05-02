@@ -65,32 +65,25 @@ die() {
 }
 
 log_msg() {
-  local message=$1
-  printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$message" | tee -a "$LOG_FILE" >/dev/null
+  printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$1" >>"$LOG_FILE"
 }
 
 is_positive_int() {
   [[ ${1:-} =~ ^[1-9][0-9]*$ ]]
 }
 
-repo_root() {
-  git rev-parse --show-toplevel 2>/dev/null || return 1
-}
-
 make_run_dir() {
   local root=$1
   local requested=$2
-  local id
+  local target
 
   if [[ -n $requested ]]; then
-    mkdir -p "$requested"
-    (cd "$requested" && pwd -P)
-    return
+    target=$requested
+  else
+    target="$root/.rb-lite/runs/$(date -u +'%Y%m%dT%H%M%SZ')-$$"
   fi
-
-  id="$(date -u +'%Y%m%dT%H%M%SZ')-$$"
-  mkdir -p "$root/.rb-lite/runs/$id"
-  (cd "$root/.rb-lite/runs/$id" && pwd -P)
+  mkdir -p "$target"
+  (cd "$target" && pwd -P)
 }
 
 filtered_pathspec=(
@@ -140,12 +133,6 @@ fingerprint_git_state() {
           done
     } | sha256sum | awk '{print $1}'
   )
-}
-
-read_task_file() {
-  local path=$1
-  [[ -f $path ]] || die "task file not found: $path"
-  cat "$path"
 }
 
 build_prompt() {
@@ -432,10 +419,11 @@ run_command() {
   is_positive_int "$max_iters" || die "--max-iters must be a positive integer"
   [[ -n $task && -n $task_file ]] && die "use either --task or --task-file, not both"
   if [[ -n $task_file ]]; then
-    task=$(read_task_file "$task_file")
+    [[ -f $task_file ]] || die "task file not found: $task_file"
+    task=$(cat "$task_file")
   fi
 
-  root=$(repo_root) || die "not in a git repository"
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || die "not in a git repository"
   cd "$root"
   if [[ -n $branch ]]; then
     git switch -c "$branch"
