@@ -153,28 +153,109 @@ test_clean_review_exits_successfully() {
 }
 
 test_default_implementer_uses_noninteractive_codex_exec() {
-  local repo
+  local repo uuid
   repo=$(new_repo)
+  uuid=11111111-2222-3333-4444-555555555555
   write_fake "$repo" codex '
 mkdir -p .rb-lite
-printf "%s\n" "$#" >.rb-lite/codex-argc
-printf "%s\n" "$1" >.rb-lite/codex-arg1
-printf "%s\n" "$2" >.rb-lite/codex-arg2
-printf "%s\n" "$3" >.rb-lite/codex-arg3
-printf "%s\n" "$4" >.rb-lite/codex-prompt
+count_file=.rb-lite/codex-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+prefix=.rb-lite/codex-$count
+printf "%s\n" "$#" >"$prefix-argc"
+i=1
+for arg in "$@"; do
+  printf "%s\n" "$arg" >"$prefix-arg$i"
+  i=$((i + 1))
+done
+if (( count != 2 )); then
+  printf "session id: 11111111-2222-3333-4444-555555555555\n" >&2
+fi
+if (( count == 1 )); then
+  printf "changed once\n" >codex-changed.txt
+elif (( count == 2 )); then
+  printf "changed twice\n" >codex-changed.txt
+fi
 '
-  write_fake "$repo" fake-reviewer 'printf "Clean review\n"'
+  write_fake "$repo" fake-reviewer '
+mkdir -p .rb-lite
+count_file=.rb-lite/default-reviewer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "P1: force default command round reset check\n"
+else
+  printf "Clean review\n"
+fi
+'
   write_reviewers "$repo" fake-reviewer
 
-  run_rb_lite "$repo" run --task "default prompt marker" --max-rounds 1 --max-iters 1 \
+  run_rb_lite "$repo" run --task "default prompt marker" --max-rounds 2 --max-iters 4 \
     >/tmp/rb-lite-test.out
 
-  assert_equals 4 "$(cat "$repo/.rb-lite/codex-argc")" "default codex arg count"
-  assert_equals exec "$(cat "$repo/.rb-lite/codex-arg1")" "default codex subcommand"
-  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-arg2")" "default codex approval flag"
-  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-arg3")" "default codex repo flag"
-  assert_file_contains "$repo/.rb-lite/codex-prompt" 'Read AGENTS\.md'
-  assert_file_contains "$repo/.rb-lite/codex-prompt" 'default prompt marker'
+  assert_equals 4 "$(cat "$repo/.rb-lite/codex-count")" "default codex call count"
+  assert_equals 4 "$(cat "$repo/.rb-lite/codex-1-argc")" "default codex arg count"
+  assert_equals exec "$(cat "$repo/.rb-lite/codex-1-arg1")" "default codex subcommand"
+  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-1-arg2")" "default codex approval flag"
+  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-1-arg3")" "default codex repo flag"
+  assert_file_contains "$repo/.rb-lite/codex-1-arg4" 'Read AGENTS\.md'
+  assert_file_contains "$repo/.rb-lite/codex-1-arg4" 'default prompt marker'
+  assert_equals 6 "$(cat "$repo/.rb-lite/codex-2-argc")" "resume codex arg count"
+  assert_equals exec "$(cat "$repo/.rb-lite/codex-2-arg1")" "resume codex subcommand"
+  assert_equals resume "$(cat "$repo/.rb-lite/codex-2-arg2")" "resume codex command"
+  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-2-arg3")" "resume codex approval flag"
+  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-2-arg4")" "resume codex repo flag"
+  assert_equals "$uuid" "$(cat "$repo/.rb-lite/codex-2-arg5")" "resume codex session id"
+  assert_file_contains "$repo/.rb-lite/codex-2-arg6" 'default prompt marker'
+  assert_equals 4 "$(cat "$repo/.rb-lite/codex-3-argc")" "default codex drops stale session arg count"
+  assert_equals exec "$(cat "$repo/.rb-lite/codex-3-arg1")" "default codex drops stale session subcommand"
+  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-3-arg2")" "default codex drops stale session approval flag"
+  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-3-arg3")" "default codex drops stale session repo flag"
+  assert_file_contains "$repo/.rb-lite/codex-3-arg4" 'default prompt marker'
+  assert_equals 4 "$(cat "$repo/.rb-lite/codex-4-argc")" "default codex round reset arg count"
+  assert_equals exec "$(cat "$repo/.rb-lite/codex-4-arg1")" "default codex round reset subcommand"
+  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-4-arg2")" "default codex round reset approval flag"
+  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-4-arg3")" "default codex round reset repo flag"
+  assert_file_contains "$repo/.rb-lite/codex-4-arg4" 'Review files'
+}
+
+test_implementer_session_resume_resets_at_round_boundary() {
+  local repo uuid
+  repo=$(new_repo)
+  uuid=11111111-2222-3333-4444-555555555555
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+printf "%s.%s:%s\n" "$ROUND" "$ITERATION" "${RB_LITE_PREV_SESSION:-}" >>.rb-lite/session-env.txt
+printf "session id: 11111111-2222-3333-4444-555555555555\n" >&2
+if [[ $ROUND == 1 && $ITERATION == 1 ]]; then
+  printf "changed once\n" >changed.txt
+fi
+'
+  write_fake "$repo" fake-reviewer '
+mkdir -p .rb-lite
+count_file=.rb-lite/reviewer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "P1: force a second round\n"
+else
+  printf "No findings.\n"
+fi
+'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "session continuity" --max-rounds 2 --max-iters 2 \
+    --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out
+
+  assert_file_contains "$repo/.rb-lite/session-env.txt" '^1\.1:$'
+  assert_file_contains "$repo/.rb-lite/session-env.txt" "^1\\.2:$uuid$"
+  assert_file_contains "$repo/.rb-lite/session-env.txt" '^2\.1:$'
 }
 
 test_env_implement_cmd_override_still_wins() {
@@ -552,6 +633,7 @@ test_implementer_stops_when_stable
 test_p1_review_triggers_remediation_round
 test_clean_review_exits_successfully
 test_default_implementer_uses_noninteractive_codex_exec
+test_implementer_session_resume_resets_at_round_boundary
 test_env_implement_cmd_override_still_wins
 test_untracked_files_affect_stability
 test_quoted_untracked_paths_affect_stability

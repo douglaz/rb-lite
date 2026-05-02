@@ -26,10 +26,22 @@ Artifacts are written under `.rb-lite/runs/<id>/` by default:
 The default implementer command is:
 
 ```bash
-codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"
+if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then
+  codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"
+else
+  codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"
+fi
 ```
 
-Override it with `--implement-cmd` or `RB_LITE_IMPLEMENT_CMD`.
+Within a single review round, rb-lite scans implementer stderr for a session ID
+and exports it as `RB_LITE_PREV_SESSION` to the next implementer iteration; the
+value resets at round boundaries or when stderr has no match. Override the
+capture regex with `RB_LITE_SESSION_REGEX` when using a non-codex implementer
+format, or set it empty to disable capture; the first capture group is used, or
+the full match when no group is present. An empty capture leaves
+`RB_LITE_PREV_SESSION` empty.
+
+Override the implementer with `--implement-cmd` or `RB_LITE_IMPLEMENT_CMD`.
 
 The default reviewer panel runs two reviewers concurrently:
 
@@ -79,6 +91,7 @@ disagreements between reviewers rather than seeing one merged blob.
 - `RB_LITE_MAX_ROUNDS`
 - `RB_LITE_MAX_ITERS`
 - `RB_LITE_IMPLEMENT_CMD`
+- `RB_LITE_SESSION_REGEX`
 - `RB_LITE_REVIEWERS_FILE`
 - `RB_LITE_RUN_DIR`
 

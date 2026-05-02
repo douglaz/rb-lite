@@ -20,7 +20,7 @@ Options:
   --max-rounds N          Maximum implement/review rounds. Default: RB_LITE_MAX_ROUNDS or 25.
   --max-iters N           Maximum implementer iterations per round. Default: RB_LITE_MAX_ITERS or 25.
   --implement-cmd CMD     Implementer shell command. Default: RB_LITE_IMPLEMENT_CMD or
-                          codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT".
+                          codex exec, resuming same-round sessions when available.
   --reviewers-file PATH   Reviewer command file. Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
   --run-dir PATH          Store run artifacts in PATH. Default: RB_LITE_RUN_DIR or .rb-lite/runs/<id>.
   --branch NAME           Create and switch to NAME before running.
@@ -31,8 +31,17 @@ Environment:
   RB_LITE_MAX_ROUNDS      Default maximum review rounds.
   RB_LITE_MAX_ITERS       Default maximum implementer iterations per round.
   RB_LITE_IMPLEMENT_CMD   Shell command run for each implementer iteration.
+  RB_LITE_PREV_SESSION    Exported to the implementer with the prior same-round session ID.
+  RB_LITE_SESSION_REGEX   Bash ERE for session IDs in implementer stderr; empty disables capture.
   RB_LITE_REVIEWERS_FILE  File with one reviewer shell command per non-comment line.
   RB_LITE_RUN_DIR         Explicit run artifact directory.
+
+The default implementer starts with codex exec using noninteractive flags, then
+uses codex exec resume with the same flags on later iterations in the same
+round after capturing a session ID from stderr. Override RB_LITE_SESSION_REGEX
+to support non-codex session ID formats, or set it empty to disable capture.
+The first capture group is used, or the full match when no group is present; no
+match or an empty capture leaves RB_LITE_PREV_SESSION empty.
 
 Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
 two-reviewer panel:
@@ -162,7 +171,7 @@ run_implementer_loop() {
   local task=$5
   shift 5
   local -a review_paths=("$@")
-  local iter before after prompt stdout stderr rc review_files_env
+  local iter before after prompt stdout stderr rc review_files_env prev_session session_regex line
 
   if (( ${#review_paths[@]} > 0 )); then
     review_files_env=$(printf '%s\n' "${review_paths[@]}")
@@ -170,6 +179,8 @@ run_implementer_loop() {
     review_files_env=
   fi
 
+  prev_session=
+  session_regex=${RB_LITE_SESSION_REGEX-'session id: ([[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12})'}
   iter=1
   while (( iter <= max_iters )); do
     before=$(fingerprint_git_state "$root")
@@ -180,11 +191,24 @@ run_implementer_loop() {
 
     if (
       cd "$root"
-      PROMPT=$prompt REVIEW_FILES=$review_files_env RUN_DIR=$RUN_DIR ROUND=$round ITERATION=$iter bash -c "$command"
+      RB_LITE_PREV_SESSION=$prev_session PROMPT=$prompt REVIEW_FILES=$review_files_env RUN_DIR=$RUN_DIR ROUND=$round ITERATION=$iter bash -c "$command"
     ) >"$stdout" 2>"$stderr"; then
       rc=0
     else
       rc=$?
+    fi
+
+    prev_session=
+    if [[ -n $session_regex ]]; then
+      while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line =~ $session_regex ]]; then
+          if [[ ${BASH_REMATCH[1]+_} ]]; then
+            prev_session=${BASH_REMATCH[1]}
+          else
+            prev_session=${BASH_REMATCH[0]}
+          fi
+        fi
+      done <"$stderr"
     fi
 
     if (( rc != 0 )); then
@@ -349,7 +373,7 @@ run_command() {
   local base=${RB_LITE_BASE:-origin/master}
   local max_rounds=${RB_LITE_MAX_ROUNDS:-25}
   local max_iters=${RB_LITE_MAX_ITERS:-25}
-  local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"'}
+  local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'}
   local reviewers_file=${RB_LITE_REVIEWERS_FILE:-.rb-lite-reviewers}
   local requested_run_dir=${RB_LITE_RUN_DIR:-}
   local task=
