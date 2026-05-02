@@ -42,6 +42,10 @@ the full match when no group is present. An empty capture leaves
 `RB_LITE_PREV_SESSION` empty.
 
 Override the implementer with `--implement-cmd` or `RB_LITE_IMPLEMENT_CMD`.
+Use `--implement-timeout SECS` or `RB_LITE_IMPLEMENT_TIMEOUT` to cap each
+implementer iteration; by default no timeout is applied. The timeout uses GNU
+coreutils `timeout`, sending SIGTERM at expiry and SIGKILL after a short grace
+period if the implementer is still running.
 
 The default reviewer panel runs two reviewers concurrently:
 
@@ -90,6 +94,7 @@ disagreements between reviewers rather than seeing one merged blob.
 - `RB_LITE_BASE`
 - `RB_LITE_MAX_ROUNDS`
 - `RB_LITE_MAX_ITERS`
+- `RB_LITE_IMPLEMENT_TIMEOUT`
 - `RB_LITE_IMPLEMENT_CMD`
 - `RB_LITE_SESSION_REGEX`
 - `RB_LITE_REVIEWERS_FILE`

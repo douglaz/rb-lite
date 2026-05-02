@@ -304,6 +304,81 @@ printf "env override\n" >.rb-lite/env-override
   assert_file_contains "$repo/.rb-lite/env-override" 'env override'
 }
 
+test_implement_timeout_fails_stuck_iteration() {
+  local repo run_dir sleep_pid status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/timeout-run"
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+sleep 5 &
+printf "%s\n" "$!" >.rb-lite/sleep-pid
+wait "$!"
+'
+
+  status=0
+  run_rb_lite "$repo" run --task "timeout" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --implement-timeout 1 --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  [[ $status != 0 ]] || fail "timed-out implementer should fail rb-lite"
+  assert_file_contains /tmp/rb-lite-test.err 'implementer loop failed'
+  assert_file_contains "$run_dir/log.txt" 'failed with exit 124'
+  sleep_pid=$(cat "$repo/.rb-lite/sleep-pid")
+  if kill -0 "$sleep_pid" 2>/dev/null; then
+    fail "timed-out implementer left sleep running"
+  fi
+}
+
+test_env_implement_timeout_fails_stuck_iteration() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/env-timeout-run"
+  write_fake "$repo" fake-implementer 'sleep 5'
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_IMPLEMENT_TIMEOUT=1 "$repo/bin/rb-lite" run \
+      --task "env timeout" --max-rounds 1 --max-iters 1 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir"
+  ) >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  [[ $status != 0 ]] || fail "env timed-out implementer should fail rb-lite"
+  assert_file_contains /tmp/rb-lite-test.err 'implementer loop failed'
+  assert_file_contains "$run_dir/log.txt" 'failed with exit 124'
+}
+
+test_cli_implement_timeout_overrides_invalid_env() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings.\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_IMPLEMENT_TIMEOUT=invalid "$repo/bin/rb-lite" run \
+      --task "timeout precedence" --max-rounds 1 --max-iters 1 \
+      --implement-cmd 'fake-implementer' --implement-timeout 1
+  ) >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+}
+
+test_implement_timeout_requires_gnu_timeout() {
+  local repo status
+  repo=$(new_repo)
+  write_fake "$repo" timeout 'printf "not GNU timeout\n"'
+
+  status=0
+  run_rb_lite "$repo" run --task "timeout validation" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'printf noop' --implement-timeout 1 \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  [[ $status != 0 ]] || fail "non-GNU timeout should fail validation"
+  assert_file_contains /tmp/rb-lite-test.err 'GNU coreutils timeout'
+}
+
 test_untracked_files_affect_stability() {
   local repo
   repo=$(new_repo)
@@ -662,6 +737,10 @@ test_default_implementer_uses_noninteractive_codex_exec
 test_implementer_session_resume_resets_at_round_boundary
 test_implementer_session_resume_picks_first_match
 test_env_implement_cmd_override_still_wins
+test_implement_timeout_fails_stuck_iteration
+test_env_implement_timeout_fails_stuck_iteration
+test_cli_implement_timeout_overrides_invalid_env
+test_implement_timeout_requires_gnu_timeout
 test_untracked_files_affect_stability
 test_quoted_untracked_paths_affect_stability
 test_dirty_symlink_retarget_affects_stability

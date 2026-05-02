@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
+IMPLEMENT_TIMEOUT_KILL_AFTER=5s
 
 DEFAULT_PROMPT=$'Read AGENTS.md if present. If a review file is provided, address the findings\nin that review. Otherwise implement the requested work. Stop when no code or\ntest changes are needed.'
 
@@ -19,6 +20,11 @@ Options:
   --base REF              Review base ref. Default: RB_LITE_BASE or origin/master.
   --max-rounds N          Maximum implement/review rounds. Default: RB_LITE_MAX_ROUNDS or 25.
   --max-iters N           Maximum implementer iterations per round. Default: RB_LITE_MAX_ITERS or 25.
+  --implement-timeout SECS
+                          Timeout in seconds for each implementer iteration;
+                          sends SIGTERM, then SIGKILL after a short grace period.
+                          Requires GNU coreutils timeout. Default:
+                          RB_LITE_IMPLEMENT_TIMEOUT or none.
   --implement-cmd CMD     Implementer shell command. Default: RB_LITE_IMPLEMENT_CMD or
                           codex exec, resuming same-round sessions when available.
   --reviewers-file PATH   Reviewer command file. Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
@@ -30,6 +36,8 @@ Environment:
   RB_LITE_BASE            Default review base.
   RB_LITE_MAX_ROUNDS      Default maximum review rounds.
   RB_LITE_MAX_ITERS       Default maximum implementer iterations per round.
+  RB_LITE_IMPLEMENT_TIMEOUT
+                          Default implementer iteration timeout in seconds.
   RB_LITE_IMPLEMENT_CMD   Shell command run for each implementer iteration.
   RB_LITE_PREV_SESSION    Exported to the implementer with the prior same-round session ID.
   RB_LITE_SESSION_REGEX   Bash ERE for session IDs in implementer stderr; empty disables capture.
@@ -167,16 +175,26 @@ run_implementer_loop() {
   local root=$1
   local round=$2
   local max_iters=$3
-  local command=$4
-  local task=$5
-  shift 5
+  local implement_timeout=$4
+  local command=$5
+  local task=$6
+  shift 6
   local -a review_paths=("$@")
   local iter before after prompt stdout stderr rc review_files_env prev_session session_regex line
+  local -a implementer_argv
 
   if (( ${#review_paths[@]} > 0 )); then
     review_files_env=$(printf '%s\n' "${review_paths[@]}")
   else
     review_files_env=
+  fi
+
+  if [[ -n $implement_timeout ]]; then
+    # GNU timeout's default mode signals the command process group, covering
+    # children spawned by the implementer shell.
+    implementer_argv=(timeout --kill-after="$IMPLEMENT_TIMEOUT_KILL_AFTER" "$implement_timeout" bash -c "$command")
+  else
+    implementer_argv=(bash -c "$command")
   fi
 
   prev_session=
@@ -191,7 +209,7 @@ run_implementer_loop() {
 
     if (
       cd "$root"
-      RB_LITE_PREV_SESSION=$prev_session PROMPT=$prompt REVIEW_FILES=$review_files_env RUN_DIR=$RUN_DIR ROUND=$round ITERATION=$iter bash -c "$command"
+      RB_LITE_PREV_SESSION=$prev_session PROMPT=$prompt REVIEW_FILES=$review_files_env RUN_DIR=$RUN_DIR ROUND=$round ITERATION=$iter "${implementer_argv[@]}"
     ) >"$stdout" 2>"$stderr"; then
       rc=0
     else
@@ -213,7 +231,11 @@ run_implementer_loop() {
     fi
 
     if (( rc != 0 )); then
-      log_msg "round $round implementer iteration $iter failed with exit $rc"
+      if [[ -n $implement_timeout && $rc == 124 ]]; then
+        log_msg "round $round implementer iteration $iter failed with exit $rc (timed out after ${implement_timeout}s)"
+      else
+        log_msg "round $round implementer iteration $iter failed with exit $rc"
+      fi
       return "$rc"
     fi
 
@@ -374,6 +396,7 @@ run_command() {
   local base=${RB_LITE_BASE:-origin/master}
   local max_rounds=${RB_LITE_MAX_ROUNDS:-25}
   local max_iters=${RB_LITE_MAX_ITERS:-25}
+  local implement_timeout=${RB_LITE_IMPLEMENT_TIMEOUT:-}
   local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'}
   local reviewers_file=${RB_LITE_REVIEWERS_FILE:-.rb-lite-reviewers}
   local requested_run_dir=${RB_LITE_RUN_DIR:-}
@@ -410,6 +433,11 @@ run_command() {
         max_iters=$2
         shift 2
         ;;
+      --implement-timeout)
+        (($# >= 2)) || die "--implement-timeout requires a value"
+        implement_timeout=$2
+        shift 2
+        ;;
       --implement-cmd)
         (($# >= 2)) || die "--implement-cmd requires a value"
         implement_cmd=$2
@@ -442,6 +470,13 @@ run_command() {
 
   is_positive_int "$max_rounds" || die "--max-rounds must be a positive integer"
   is_positive_int "$max_iters" || die "--max-iters must be a positive integer"
+  [[ -z $implement_timeout ]] || is_positive_int "$implement_timeout" \
+    || die "--implement-timeout must be a positive integer number of seconds"
+  if [[ -n $implement_timeout ]]; then
+    command -v timeout >/dev/null || die "--implement-timeout requires GNU coreutils timeout"
+    timeout --version 2>/dev/null | grep -q 'GNU coreutils' \
+      || die "--implement-timeout requires GNU coreutils timeout"
+  fi
   [[ -n $task && -n $task_file ]] && die "use either --task or --task-file, not both"
   if [[ -n $task_file ]]; then
     [[ -f $task_file ]] || die "task file not found: $task_file"
@@ -460,10 +495,11 @@ run_command() {
   log_msg "run directory: $RUN_DIR"
   log_msg "base: $base"
   log_msg "max rounds: $max_rounds; max implementer iterations: $max_iters"
+  [[ -z $implement_timeout ]] || log_msg "implementer iteration timeout: ${implement_timeout}s"
 
   round=1
   while (( round <= max_rounds )); do
-    if ! run_implementer_loop "$root" "$round" "$max_iters" "$implement_cmd" "$task" "${review_paths[@]}"; then
+    if ! run_implementer_loop "$root" "$round" "$max_iters" "$implement_timeout" "$implement_cmd" "$task" "${review_paths[@]}"; then
       die "implementer loop failed; see $RUN_DIR"
     fi
 
