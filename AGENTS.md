@@ -18,3 +18,10 @@ avoid recreating ralph-burning's durable orchestration stack.
 - Use `just` for local task recipes instead of `make`.
 - Verification should include `just test`, `nix build`, and `nix flake check`.
   Do not introduce a Rust crate or Cargo workflow.
+
+## Reviewer Scope
+
+Reviewers (codex review, claude -p, custom panel commands) must ignore changes
+under `.rb-lite/`, `.ralph-burning/`, and `.git/ralph-burning-live/`. Those
+paths hold runtime logs and orchestration state, not code under review — the
+implementer's stability fingerprint already excludes them.

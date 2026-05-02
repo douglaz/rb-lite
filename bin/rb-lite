@@ -34,11 +34,28 @@ Environment:
   RB_LITE_REVIEWERS_FILE  File with one reviewer shell command per non-comment line.
   RB_LITE_RUN_DIR         Explicit run artifact directory.
 
-Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs:
+Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
+two-reviewer panel:
   codex review --base "$BASE"
+  claude -p "<P0..P3 review prompt>" --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"
+Both binaries must be on PATH. Override the panel by writing .rb-lite-reviewers.
+The panel succeeds as long as at least one reviewer exits 0; failed reviewers
+are noted in latest-review.md but do not abort the run.
 
-Commands receive PROMPT, BASE, REVIEW_FILE, RUN_DIR, ROUND, ITERATION, and REVIEWER_INDEX
-through the environment as applicable.
+Reviewers run with stdin closed. Per-reviewer markdown files (one per reviewer,
+review-round-N-K.md) are passed to the implementer so it can weigh each
+opinion independently. Reviewer commands must emit findings (P0/P1/P2/P3 or
+"No findings.") on stdout. Stderr is treated as tool/transcript noise and is
+excluded from the implementer feedback when the reviewer exits 0. For failed
+reviewers, the last 20 lines of stderr are appended to that reviewer's file.
+Full stderr is always preserved on disk under reviewer-round-N-K.stderr.
+
+Commands receive PROMPT, BASE, REVIEW_FILES, RUN_DIR, ROUND, ITERATION, and
+REVIEWER_INDEX through the environment as applicable. REVIEW_FILES is a
+newline-separated list of per-reviewer markdown paths (one file per reviewer,
+written as review-round-N-K.md). The implementer is told via PROMPT to read
+each one. The legacy REVIEW_FILE env var has been removed; legacy
+--implement-cmd wrappers must read REVIEW_FILES instead.
 EOF
 }
 
@@ -133,15 +150,20 @@ read_task_file() {
 
 build_prompt() {
   local task=$1
-  local review_file=$2
+  shift
+  local -a review_paths=("$@")
+  local p
 
   printf '%s\n' "$DEFAULT_PROMPT"
   if [[ -n $task ]]; then
     printf '\nTask:\n%s\n' "$task"
   fi
-  if [[ -n $review_file ]]; then
-    printf '\nReview file: %s\n' "$review_file"
-    printf 'Address the actionable P0/P1/P2/P3 findings from that review, then stop when no code or test changes are needed.\n'
+  if (( ${#review_paths[@]} > 0 )); then
+    printf '\nReview files (one per reviewer; read each independently and weigh findings — reviewers may disagree):\n'
+    for p in "${review_paths[@]}"; do
+      printf '  %s\n' "$p"
+    done
+    printf 'Address the actionable P0/P1/P2/P3 findings across these reviews, then stop when no code or test changes are needed.\n'
   fi
 }
 
@@ -151,20 +173,27 @@ run_implementer_loop() {
   local max_iters=$3
   local command=$4
   local task=$5
-  local review_file=$6
-  local iter before after prompt stdout stderr rc
+  shift 5
+  local -a review_paths=("$@")
+  local iter before after prompt stdout stderr rc review_files_env
+
+  if (( ${#review_paths[@]} > 0 )); then
+    review_files_env=$(printf '%s\n' "${review_paths[@]}")
+  else
+    review_files_env=
+  fi
 
   iter=1
   while (( iter <= max_iters )); do
     before=$(fingerprint_git_state "$root")
-    prompt=$(build_prompt "$task" "$review_file")
+    prompt=$(build_prompt "$task" "${review_paths[@]}")
     stdout="$RUN_DIR/implementer-round-${round}-iter-${iter}.stdout"
     stderr="$RUN_DIR/implementer-round-${round}-iter-${iter}.stderr"
     log_msg "round $round implementer iteration $iter starting"
 
     if (
       cd "$root"
-      PROMPT=$prompt REVIEW_FILE=$review_file RUN_DIR=$RUN_DIR ROUND=$round ITERATION=$iter bash -c "$command"
+      PROMPT=$prompt REVIEW_FILES=$review_files_env RUN_DIR=$RUN_DIR ROUND=$round ITERATION=$iter bash -c "$command"
     ) >"$stdout" 2>"$stderr"; then
       rc=0
     else
@@ -204,41 +233,66 @@ load_reviewers() {
   fi
 
   if ((${#REVIEWERS[@]} == 0)); then
-    REVIEWERS=('codex review --base "$BASE"')
+    REVIEWERS=(
+      'codex review --base "$BASE"'
+      'claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). If there are no actionable findings, output exactly: No findings. Do not modify any files." --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"'
+    )
   fi
 }
 
-combine_review_outputs() {
+write_review_files() {
   local round=$1
   local count=$2
-  local combined=$RUN_DIR/latest-review.md
-  local idx stdout stderr
+  local idx stdout stderr rc status path
+  REVIEW_FILES_PATHS=()
 
-  : >"$combined"
   for ((idx = 1; idx <= count; idx++)); do
     stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
     stderr="$RUN_DIR/reviewer-round-${round}-${idx}.stderr"
+    rc=${REVIEWER_RCS[$((idx - 1))]:-0}
+    if (( rc == 0 )); then
+      status="exit 0"
+    else
+      status="exit $rc — output may be partial"
+    fi
+    path="$RUN_DIR/review-round-${round}-${idx}.md"
     {
-      printf '## Reviewer %s stdout\n\n' "$idx"
+      printf '# Reviewer %s (%s)\n\n' "$idx" "$status"
       if [[ -s $stdout ]]; then
         cat "$stdout"
       else
-        printf '(empty)\n'
+        printf '(no stdout)\n'
       fi
-      printf '\n\n## Reviewer %s stderr\n\n' "$idx"
-      if [[ -s $stderr ]]; then
-        cat "$stderr"
-      else
-        printf '(empty)\n'
+      if (( rc != 0 )); then
+        printf '\n\n## Reviewer %s stderr tail (last 20 lines)\n\n```\n' "$idx"
+        if [[ -s $stderr ]]; then
+          tail -n 20 "$stderr"
+        else
+          printf '(empty)\n'
+        fi
+        printf '```\n'
       fi
-      printf '\n\n'
-    } >>"$combined"
+    } >"$path"
+    if (( rc == 0 )); then
+      REVIEW_FILES_PATHS+=("$path")
+    fi
   done
 }
 
 review_has_findings() {
-  local combined=$1
-  grep -Eq '(^|[^[:alnum:]_])P[0-3]([^[:alnum:]_]|$)' "$combined"
+  local round=$1
+  local count=$2
+  local idx stdout rc
+  for ((idx = 1; idx <= count; idx++)); do
+    rc=${REVIEWER_RCS[$((idx - 1))]:-0}
+    (( rc == 0 )) || continue
+    stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
+    [[ -f $stdout ]] || continue
+    if grep -Eq '(^|[^[:alnum:]_])P[0-3]([^[:alnum:]_]|$)' "$stdout"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 run_review_panel() {
@@ -246,11 +300,12 @@ run_review_panel() {
   local round=$2
   local base=$3
   local reviewers_file=$4
-  local count idx command stdout stderr pid failed rc
+  local count idx command stdout stderr pid failed succeeded rc
   local -a pids
 
   REVIEW_PANEL_RESULT=failed
   REVIEW_PANEL_FAILURE_EXIT=0
+  REVIEWER_RCS=()
   load_reviewers "$reviewers_file"
   count=${#REVIEWERS[@]}
   pids=()
@@ -262,30 +317,37 @@ run_review_panel() {
     stderr="$RUN_DIR/reviewer-round-${round}-${idx}.stderr"
     (
       cd "$root"
-      BASE=$base RUN_DIR=$RUN_DIR ROUND=$round REVIEWER_INDEX=$idx bash -c "$command"
+      BASE=$base RUN_DIR=$RUN_DIR ROUND=$round REVIEWER_INDEX=$idx bash -c "$command" </dev/null
     ) >"$stdout" 2>"$stderr" &
     pids+=("$!")
   done
 
   failed=0
+  succeeded=0
   for pid in "${pids[@]}"; do
     if wait "$pid"; then
       rc=0
+      ((succeeded++))
     else
       rc=$?
       failed=$rc
     fi
+    REVIEWER_RCS+=("$rc")
   done
 
-  combine_review_outputs "$round" "$count"
+  write_review_files "$round" "$count"
 
-  if (( failed != 0 )); then
-    log_msg "round $round review panel failed with exit $failed"
+  if (( succeeded == 0 )); then
+    log_msg "round $round review panel failed: 0 of $count reviewers succeeded (last exit $failed)"
     REVIEW_PANEL_FAILURE_EXIT=$failed
     return 1
   fi
 
-  if review_has_findings "$RUN_DIR/latest-review.md"; then
+  if (( failed != 0 )); then
+    log_msg "round $round review panel proceeded with partial failures: $succeeded of $count reviewers succeeded (last failure exit $failed)"
+  fi
+
+  if review_has_findings "$round" "$count"; then
     log_msg "round $round review panel reported actionable findings"
     REVIEW_PANEL_RESULT=findings
     return 0
@@ -306,7 +368,8 @@ run_command() {
   local task=
   local task_file=
   local branch=
-  local root round review_file rc
+  local root round rc
+  local -a review_paths=()
 
   while (($#)); do
     case $1 in
@@ -385,10 +448,9 @@ run_command() {
   log_msg "base: $base"
   log_msg "max rounds: $max_rounds; max implementer iterations: $max_iters"
 
-  review_file=
   round=1
   while (( round <= max_rounds )); do
-    if ! run_implementer_loop "$root" "$round" "$max_iters" "$implement_cmd" "$task" "$review_file"; then
+    if ! run_implementer_loop "$root" "$round" "$max_iters" "$implement_cmd" "$task" "${review_paths[@]}"; then
       die "implementer loop failed; see $RUN_DIR"
     fi
 
@@ -402,7 +464,7 @@ run_command() {
         exit 0
         ;;
       findings)
-        review_file="$RUN_DIR/latest-review.md"
+        review_paths=("${REVIEW_FILES_PATHS[@]}")
         ((round++))
         ;;
       *)
@@ -411,7 +473,7 @@ run_command() {
     esac
   done
 
-  die "max rounds hit before review panel was clean; see $RUN_DIR/latest-review.md"
+  die "max rounds hit before review panel was clean; see $RUN_DIR"
 }
 
 main() {
@@ -439,5 +501,7 @@ LOG_FILE=
 REVIEW_PANEL_RESULT=
 REVIEW_PANEL_FAILURE_EXIT=0
 declare -a REVIEWERS
+declare -a REVIEWER_RCS
+declare -a REVIEW_FILES_PATHS
 
 main "$@"

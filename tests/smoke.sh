@@ -109,8 +109,11 @@ count=0
 [[ -f $count_file ]] && count=$(cat "$count_file")
 count=$((count + 1))
 printf "%s\n" "$count" >"$count_file"
-if [[ $PROMPT == *"Review file:"* ]]; then
+if [[ $PROMPT == *"Review files"* ]]; then
   printf "saw review\n" >remediated.txt
+fi
+if [[ -n ${REVIEW_FILES:-} ]]; then
+  printf "%s\n" "$REVIEW_FILES" >env-review-files.txt
 fi
 '
   write_fake "$repo" fake-reviewer '
@@ -133,6 +136,7 @@ fi
 
   assert_equals 3 "$(cat "$repo/.rb-lite/implementer-count")" "remediation implementer count"
   assert_file_contains "$repo/remediated.txt" 'saw review'
+  assert_file_contains "$repo/env-review-files.txt" 'review-round-1-1\.md'
 }
 
 test_clean_review_exits_successfully() {
@@ -308,7 +312,7 @@ test_custom_run_dir_does_not_affect_stability() {
   [[ ! -f $run_dir/implementer-round-1-iter-2.stdout ]] || fail "custom run dir artifact affected stability"
 }
 
-test_reviewer_config_aggregates_multiple_outputs() {
+test_reviewer_config_writes_per_reviewer_files() {
   local repo run_dir
   repo=$(new_repo)
   run_dir="$repo/.rb-lite/custom-run"
@@ -322,11 +326,51 @@ test_reviewer_config_aggregates_multiple_outputs() {
     printf 'reviewer-two\n'
   } >"$repo/.rb-lite-reviewers"
 
-  run_rb_lite "$repo" run --task "aggregate" --max-rounds 1 --max-iters 1 \
+  run_rb_lite "$repo" run --task "per-reviewer" --max-rounds 1 --max-iters 1 \
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
 
-  assert_file_contains "$run_dir/latest-review.md" 'reviewer one clean'
-  assert_file_contains "$run_dir/latest-review.md" 'reviewer two clean'
+  assert_file_contains "$run_dir/review-round-1-1.md" 'reviewer one clean'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'reviewer two clean'
+  if grep -q 'reviewer two clean' "$run_dir/review-round-1-1.md"; then
+    fail "reviewer 1 file should not contain reviewer 2 output"
+  fi
+  [[ ! -e $run_dir/latest-review.md ]] || fail "latest-review.md should not exist (combined doc dropped)"
+}
+
+test_default_reviewer_panel_runs_codex_and_claude() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/default-panel"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" codex '
+case "${1:-}" in
+  review)
+    printf "codex says clean\n"
+    ;;
+  *)
+    printf "unexpected codex args: %s\n" "$*" >&2
+    exit 99
+    ;;
+esac
+'
+  write_fake "$repo" claude '
+mkdir -p .rb-lite
+printf "%s\n" "$*" >.rb-lite/claude-args
+printf "claude says clean\n"
+'
+
+  run_rb_lite "$repo" run --task "default panel" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains "$run_dir/review-round-1-1.md" 'codex says clean'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'claude says clean'
+  assert_file_contains "$repo/.rb-lite/claude-args" 'permission-mode acceptEdits'
+  assert_file_contains "$repo/.rb-lite/claude-args" 'allowedTools'
+  assert_file_contains "$repo/.rb-lite/claude-args" 'Bash,Edit,Write,Read,Glob,Grep'
+  if grep -q 'dangerously-skip-permissions' "$repo/.rb-lite/claude-args"; then
+    fail "default claude reviewer must not use --dangerously-skip-permissions"
+  fi
+  assert_file_contains "$repo/.rb-lite/claude-args" 'base ref '
 }
 
 test_reviewer_exit_two_is_operational_failure() {
@@ -352,6 +396,156 @@ printf "%s\n" "$count" >"$count_file"
   assert_file_contains /tmp/rb-lite-test.err 'review panel failed with exit 2'
 }
 
+test_reviewer_stderr_excluded_from_combined_when_clean() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/stderr-clean"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" noisy-reviewer '
+printf "STDOUT_REVIEW_BODY\n"
+printf "STDERR_NOISE_LINE_ALPHA\n" >&2
+printf "STDERR_NOISE_LINE_BETA\n" >&2
+'
+  write_reviewers "$repo" noisy-reviewer
+
+  run_rb_lite "$repo" run --task "stderr noise" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains "$run_dir/review-round-1-1.md" 'STDOUT_REVIEW_BODY'
+  if grep -q 'STDERR_NOISE_LINE' "$run_dir/review-round-1-1.md"; then
+    fail "clean reviewer stderr leaked into per-reviewer file"
+  fi
+  assert_file_contains "$run_dir/reviewer-round-1-1.stderr" 'STDERR_NOISE_LINE_ALPHA'
+}
+
+test_failed_reviewer_path_omitted_from_review_files() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/failed-omitted"
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if [[ -n ${REVIEW_FILES:-} ]]; then
+  printf "%s\n" "$REVIEW_FILES" >round-${ROUND}-review-files.txt
+fi
+'
+  write_fake "$repo" reviewer-a 'printf "command not found\n" >&2; exit 7'
+  write_fake "$repo" reviewer-b '
+mkdir -p .rb-lite
+count_file=.rb-lite/reviewer-b-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "P1: real finding\n"
+else
+  printf "No findings.\n"
+fi
+'
+  {
+    printf "reviewer-a\n"
+    printf "reviewer-b\n"
+  } >"$repo/.rb-lite-reviewers"
+
+  run_rb_lite "$repo" run --task "failed omitted" --max-rounds 2 --max-iters 2 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 2 round'
+  [[ -f $repo/round-2-review-files.txt ]] || fail "round-2 implementer did not see REVIEW_FILES"
+  assert_file_contains "$repo/round-2-review-files.txt" 'review-round-1-2\.md'
+  if grep -q 'review-round-1-1\.md' "$repo/round-2-review-files.txt"; then
+    fail "REVIEW_FILES on round 2 should not include the failed reviewer's path"
+  fi
+}
+
+test_failed_reviewer_stdout_p_token_does_not_trigger_round() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/stdout-pseudofinding"
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+'
+  write_fake "$repo" failing-reviewer 'printf "usage: reviewer [P0|P1|P2|P3]\n"; exit 5'
+  write_fake "$repo" passing-reviewer 'printf "No findings.\n"'
+  {
+    printf 'failing-reviewer\n'
+    printf 'passing-reviewer\n'
+  } >"$repo/.rb-lite-reviewers"
+
+  run_rb_lite "$repo" run --task "stdout p-token" --max-rounds 2 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "stdout p-token implementer count"
+}
+
+test_failed_reviewer_stderr_p_token_does_not_trigger_round() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/stderr-pseudofinding"
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+'
+  write_fake "$repo" failing-reviewer 'printf "usage: reviewer [P0|P1|P2|P3]\n" >&2; exit 4'
+  write_fake "$repo" passing-reviewer 'printf "No findings.\n"'
+  {
+    printf 'failing-reviewer\n'
+    printf 'passing-reviewer\n'
+  } >"$repo/.rb-lite-reviewers"
+
+  run_rb_lite "$repo" run --task "stderr p-token" --max-rounds 2 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "stderr p-token implementer count"
+  assert_file_contains "$run_dir/review-round-1-1.md" 'usage: reviewer'
+}
+
+test_partial_reviewer_failure_does_not_abort() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/partial-failure"
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+'
+  write_fake "$repo" failing-reviewer 'printf "boom\n" >&2; exit 3'
+  write_fake "$repo" passing-reviewer 'printf "passing reviewer clean\n"'
+  {
+    printf 'failing-reviewer\n'
+    printf 'passing-reviewer\n'
+  } >"$repo/.rb-lite-reviewers"
+
+  run_rb_lite "$repo" run --task "partial failure" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'passing reviewer clean'
+  assert_file_contains "$run_dir/review-round-1-1.md" 'exit 3 — output may be partial'
+  assert_file_contains "$run_dir/review-round-1-1.md" 'stderr tail'
+  assert_file_contains "$run_dir/review-round-1-1.md" 'boom'
+  assert_file_contains "$run_dir/log.txt" 'partial failures: 1 of 2 reviewers succeeded'
+}
+
 mkdir -p "$TMP_ROOT"
 
 test_implementer_stops_when_stable
@@ -364,7 +558,13 @@ test_quoted_untracked_paths_affect_stability
 test_dirty_symlink_retarget_affects_stability
 test_rb_lite_artifacts_do_not_affect_stability
 test_custom_run_dir_does_not_affect_stability
-test_reviewer_config_aggregates_multiple_outputs
+test_reviewer_config_writes_per_reviewer_files
+test_default_reviewer_panel_runs_codex_and_claude
 test_reviewer_exit_two_is_operational_failure
+test_reviewer_stderr_excluded_from_combined_when_clean
+test_failed_reviewer_path_omitted_from_review_files
+test_failed_reviewer_stdout_p_token_does_not_trigger_round
+test_failed_reviewer_stderr_p_token_does_not_trigger_round
+test_partial_reviewer_failure_does_not_abort
 
 printf 'ok - smoke tests passed\n'
