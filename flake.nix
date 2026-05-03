@@ -19,6 +19,15 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          runtimeDeps = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.findutils
+            pkgs.gawk
+            pkgs.git
+            pkgs.gnugrep
+            pkgs.gnused
+          ];
         in
         {
           default = pkgs.stdenvNoCC.mkDerivation {
@@ -26,14 +35,30 @@
             version = "0.1.0";
             src = self;
 
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+
             dontBuild = true;
 
             installPhase = ''
               runHook preInstall
-              install -Dm755 bin/rb-lite "$out/bin/rb-lite"
+              install -Dm755 bin/rb-lite "$out/libexec/rb-lite/rb-lite"
               install -Dm644 README.md "$out/share/doc/rb-lite/README.md"
+              install -Dm644 AGENTS.md "$out/share/doc/rb-lite/AGENTS.md"
+
+              patchShebangs "$out/libexec/rb-lite/rb-lite"
+
+              makeWrapper "$out/libexec/rb-lite/rb-lite" "$out/bin/rb-lite" \
+                --prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}
+
               runHook postInstall
             '';
+
+            meta = {
+              description = "Minimal Bash CLI for an implement/review loop driven by codex + claude";
+              homepage = "https://github.com/douglaz/rb-lite";
+              platforms = pkgs.lib.platforms.unix;
+              mainProgram = "rb-lite";
+            };
           };
         }
       );

@@ -1,117 +1,220 @@
 # rb-lite
 
-`rb-lite` is a small Bash CLI for the implement/review loop used in this repo:
-run an implementer until the git diff stabilizes, run a lightweight review
-panel, trigger another implementer round on P0/P1/P2 findings by default, and
-stop when the panel is clean or a cap is reached.
+A small Bash CLI that drives an **implement → review** loop using
+[`codex`](https://github.com/openai/codex) and
+[`claude`](https://docs.anthropic.com/claude/docs/claude-code) as the
+implementer and reviewer panel. Repeatedly invokes the implementer until the
+git diff stabilizes, runs codex + claude in parallel as a review panel, feeds
+P0/P1/P2 findings back into the implementer, and stops when the panel is
+clean, the implementer refuses to act on remaining findings, or a budget cap
+is hit.
+
+Entirely in shell, no daemons, no state DB, runs in any git repo.
+
+## Quick start
+
+You need a git working tree, the `codex` and `claude` CLIs on `PATH`
+(authenticated to whichever backend you use), and `nix` with flakes enabled.
+
+```bash
+# Run the latest version straight from GitHub (no install)
+nix run github:douglaz/rb-lite -- run \
+  --task "Address whatever needs fixing on this branch" \
+  --base origin/main
+```
+
+That single command:
+1. Builds rb-lite from source (cached after first run)
+2. Spawns codex as the implementer in your repo's working tree
+3. Loops implementer ↔ panel-reviewer (codex + claude in parallel)
+4. Stops when the panel reports no actionable findings, exits clean
+
+Artifacts land in `.rb-lite/runs/<timestamp>-<pid>/`.
+
+## Installing
+
+Pick one:
+
+```bash
+# A) Run on demand without installing
+nix run github:douglaz/rb-lite -- run --task "..." --base origin/main
+
+# B) Install into your user profile
+nix profile install github:douglaz/rb-lite
+rb-lite run --task "..." --base origin/main
+
+# C) Clone and run from source (if you want to hack on it)
+git clone https://github.com/douglaz/rb-lite.git
+cd rb-lite
+bin/rb-lite run --task "..." --base origin/main
+```
+
+For (C), the script needs `bash`, `git`, and standard coreutils on `PATH`. (A)
+and (B) wrap those dependencies via Nix automatically.
+
+## Prerequisites
+
+- A git repository (rb-lite refuses to run outside one).
+- `codex` CLI on `PATH`, authenticated. The default implementer is
+  `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"`,
+  reusing the same session within a round when possible. The default reviewer
+  panel includes `codex review`.
+- `claude` CLI on `PATH`, authenticated. The default reviewer panel also
+  includes `claude -p` running with `--permission-mode acceptEdits` and a
+  broad allowed-tools list (matches the sister `ralph-burning` project).
+
+You can override or replace either side — see "Configuration" below.
+
+## What it does, in one diagram
+
+```
+                        ┌───────────────────────────────────┐
+                        │ rb-lite run --task "..." --base X │
+                        └────────────────┬──────────────────┘
+                                         │
+                          ┌──────────────▼──────────────┐
+                          │ Implementer iteration loop  │
+                          │  • codex exec [resume ...]  │
+                          │  • repeat until git state   │
+                          │    stops changing           │
+                          └──────────────┬──────────────┘
+                                         │
+                          ┌──────────────▼──────────────┐
+                          │ Review panel (concurrent)   │
+                          │  • codex review --base X    │
+                          │  • claude -p "<prompt>"     │
+                          │  • each writes              │
+                          │    review-round-N-K.md      │
+                          └──────────────┬──────────────┘
+                                         │
+                                         ▼
+        clean (no P0/P1/P2)?  ──────► EXIT 0
+        all reviewers failed?  ─────► EXIT 11
+        max rounds hit?  ───────────► EXIT 12
+        2 no-op rounds + findings? ─► EXIT 13 (consensus failure)
+        otherwise: feed reviews to implementer, next round
+```
 
 ## Usage
 
 ```bash
-bin/rb-lite run \
+rb-lite run \
   --task "Fix the next ready bead" \
-  --base origin/master \
+  --base origin/main \
   --max-rounds 25 \
   --max-iters 25
 ```
 
-Artifacts are written under `.rb-lite/runs/<id>/` by default:
+Common flags (full list: `rb-lite --help`):
 
-- implementer stdout/stderr for each iteration
-- reviewer stdout/stderr for each reviewer and round
-- `review-round-N-K.md` — one markdown file per reviewer per round, fed back
-  to the implementer on the next round
-- `log.txt`
+| Flag | Default | Purpose |
+|---|---|---|
+| `--task TEXT` / `--task-file PATH` | empty | Free-form task instruction appended to the implementer prompt |
+| `--base REF` | `origin/master` | Git ref the reviewers diff against |
+| `--max-rounds N` | 25 | Cap on implement→review cycles |
+| `--max-iters N` | 25 | Cap on implementer iterations within a round |
+| `--max-noop-rounds N` | 2 | Consecutive no-op implementer rounds before consensus-failure exit |
+| `--min-findings-severity LEVEL` | `P2` | Lowest severity that triggers another round (`P0`/`P1`/`P2`/`P3`) |
+| `--implement-timeout SECS` | 14400 | SIGTERM/SIGKILL each implementer iteration if it runs longer |
+| `--implement-cmd CMD` | codex shell | Override the implementer subprocess |
+| `--reviewers-file PATH` | `.rb-lite-reviewers` | Custom reviewer panel (one shell command per line) |
+| `--branch NAME` | none | `git switch -c NAME` before starting |
+| `--run-dir PATH` | `.rb-lite/runs/<id>` | Where to store run artifacts |
 
-Progress lines written to `log.txt` are also mirrored to stderr by default, so
-long runs show round/iteration status in the terminal. Redirect stderr if you
-want to suppress them.
+Each flag has a matching env var (`RB_LITE_BASE`, `RB_LITE_MAX_ROUNDS`, …);
+precedence is CLI flag > env var > default.
 
-The default implementer command is:
+## Run artifacts
 
-```bash
-if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then
-  codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"
-else
-  codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"
-fi
+Each run gets `.rb-lite/runs/<UTC-timestamp>-<pid>/` with:
+
+- `implementer-round-N-iter-K.{stdout,stderr}` — every implementer call
+- `reviewer-round-N-K.{stdout,stderr}` — raw output from each reviewer
+- `review-round-N-K.md` — per-reviewer markdown that the implementer reads on
+  the next round (one file per reviewer; the implementer is told via PROMPT
+  to read each independently and weigh disagreements)
+- `log.txt` — timestamped progress log
+
+Progress lines are also mirrored to **stderr** in real time so long runs are
+visible in the terminal. Suppress with `2>/dev/null` if you want quiet.
+
+## Customizing the reviewer panel
+
+The default panel is fine for most cases. To override, drop a
+`.rb-lite-reviewers` file in your repo root with one shell command per line
+(blank lines and `#` comments ignored):
+
+```
+# .rb-lite-reviewers
+codex review --base "$BASE"
+claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
+my-custom-linter --json | wrap-as-p-tags
 ```
 
-Within a single review round, rb-lite scans implementer stderr for a session ID
-and exports it as `RB_LITE_PREV_SESSION` to the next implementer iteration; the
-value resets at round boundaries or when stderr has no match. Override the
-capture regex with `RB_LITE_SESSION_REGEX` when using a non-codex implementer
-format, or set it empty to disable capture; the first capture group is used, or
-the full match when no group is present. An empty capture leaves
-`RB_LITE_PREV_SESSION` empty.
+Reviewers run **concurrently**, each gets `BASE`, `RUN_DIR`, `ROUND`,
+`REVIEWER_INDEX` in env, and stdin closed.
 
-Override the implementer with `--implement-cmd` or `RB_LITE_IMPLEMENT_CMD`.
-Use `--implement-timeout SECS` or `RB_LITE_IMPLEMENT_TIMEOUT` to cap each
-implementer iteration; default is 14400 seconds (4 hours). The timeout uses GNU
-coreutils `timeout`, sending SIGTERM at expiry and SIGKILL after a short grace
-period if the implementer is still running.
+### Reviewer contract
 
-By default, rb-lite only starts a remediation round when a successful reviewer
-emits a P0, P1, or P2 finding. P3-only review output is treated as clean; this
-is a deliberate behavior change to avoid late-stage nit ratchets. Use
-`--min-findings-severity P3` or `RB_LITE_MIN_FINDINGS_SEVERITY=P3` to preserve
-the old behavior. Valid levels are exactly `P0`, `P1`, `P2`, and `P3`.
+- Findings go on **stdout**. Stderr is treated as tool noise and excluded
+  from the implementer feedback when the reviewer exits 0 (a stderr tail is
+  appended only when a reviewer exits non-zero, for debugging).
+- Severities tagged near the start of a finding line: `P2:`, `[P2]`,
+  `**P2**:`, or e.g. `Issue 1 (P2):`. Incidental mentions in finding bodies
+  are ignored.
+- Exit `0` = real review; exit non-zero = tool failure (output may be
+  partial or garbage). Findings detection ignores non-zero reviewers
+  entirely. A linter that exits non-zero on findings must be wrapped:
+  `mylinter || true`.
+- Panel succeeds with **at least one** exit-0 reviewer; failed reviewers
+  don't abort the run.
 
-To avoid spending repeated cycles on reviewer findings the implementer declines
-to change, rb-lite stops with consensus failure after two consecutive no-op
-implementer rounds that still produce actionable reviewer findings. Configure
-this with `--max-noop-rounds N` or `RB_LITE_MAX_NOOP_ROUNDS`.
+## Customizing the implementer
 
-The default reviewer panel runs two reviewers concurrently:
+```bash
+rb-lite run --implement-cmd 'my-implementer "$PROMPT"' --task "..."
+```
 
-- `codex review --base "$BASE"`
-- `claude -p "<P0..P3 review prompt>" --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"` (matches the sibling ralph-burning project's claude backend config; the prompt's "Do not modify any files" line is the operative contract)
+The implementer command receives:
 
-Both `codex` and `claude` must be on `PATH`. To override the panel, create a
-`.rb-lite-reviewers` file with one shell command per line. Blank lines and lines
-starting with `#` are ignored. The panel proceeds as long as at least one
-reviewer exits 0; failed reviewers are tagged in their per-reviewer file but do
-not abort the run. The run only aborts if every reviewer exits non-zero.
+| Env var | Meaning |
+|---|---|
+| `PROMPT` | Full prompt text including task and per-reviewer file paths |
+| `REVIEW_FILES` | Newline-separated list of per-reviewer markdown paths (empty on round 1) |
+| `RB_LITE_PREV_SESSION` | Session ID captured from the prior iteration's stderr (empty on iter 1; resets across rounds) |
+| `RUN_DIR` | Absolute path to the run-artifact dir |
+| `ROUND` / `ITERATION` | Current round and iteration numbers |
 
-Each reviewer's output is written to its own `review-round-N-K.md` file. The
-implementer receives the list via the `REVIEW_FILES` env var (newline-separated)
-and is told via `PROMPT` to read each file independently — so it can weigh
-disagreements between reviewers rather than seeing one merged blob.
+Custom implementers should read `REVIEW_FILES` (or just rely on `PROMPT`,
+which enumerates the paths). The legacy `REVIEW_FILE` (singular,
+combined-doc) env var was removed.
 
-**Reviewer contract**:
+## Stop conditions and exit codes
 
-- A reviewer command must emit its review (any `P0`/`P1`/`P2`/`P3` findings,
-  or `No findings.`) on **stdout**.
-- Finding severities should be tagged near the start of each finding line, for
-  example `P2:`, `[P2]`, `**P2**:`, or an issue heading like
-  `Issue 1 (P2):`. Incidental mentions later in a finding body are ignored.
-- Only findings at or above the configured severity floor trigger another
-  implementer round. The default floor is `P2`, so P3-only output is clean
-  unless `--min-findings-severity P3` or `RB_LITE_MIN_FINDINGS_SEVERITY=P3` is
-  set.
-- **Exit code semantics**: exit `0` = the tool succeeded and its stdout is the
-  real review; exit non-zero = the tool itself failed and its output may be
-  partial or garbage. Findings detection and the per-round implementer feed
-  ignore non-zero reviewers entirely. A reviewer that uses non-zero exit codes
-  semantically (e.g. a linter that exits `1` on findings) must be wrapped to
-  exit `0`: `mylinter; true` or `mylinter || true`.
-- Stderr is treated as tool/transcript noise and is excluded from the
-  per-reviewer markdown when the reviewer exits 0 (this keeps codex's
-  exec/transcript dumps off the loop). For reviewers that exit non-zero, the
-  last 20 lines of stderr are appended to that reviewer's file as a debugging
-  tail. Full per-reviewer stderr is always preserved on disk under
-  `reviewer-round-N-K.stderr`.
-- Reviewers are launched with stdin closed so `claude -p` does not stall
-  waiting for input.
+| Code | Status | Meaning |
+|---|---|---|
+| `0`  | `clean` | Review panel reported no findings at or above severity floor |
+| `2`  | `usage_error` | CLI parsing failure, invalid value, conflicting flags |
+| `3`  | `env_error` | Not in git repo, missing tool, run-dir setup failure |
+| `10` | `implementer_failed` | Implementer subprocess non-zero (incl. timeout 124/137) or max-iters without stabilizing |
+| `11` | `review_panel_failed` | Zero reviewers exited 0 |
+| `12` | `max_rounds_hit` | Hit `--max-rounds` before convergence |
+| `13` | `consensus_failure` | Hit `--max-noop-rounds` consecutive no-op rounds with reviewers still finding things |
+| `70` | `internal_error` | Internal invariant violation or unhandled shell failure |
 
-> **Breaking change**: prior versions exported a single `REVIEW_FILE` env var
-> pointing at a combined `latest-review.md`. Both are gone. Custom
-> `--implement-cmd` scripts must read `REVIEW_FILES` (newline-separated) or
-> rely on the `PROMPT` text which already enumerates each path. Legacy
-> wrappers using `set -u` and `REVIEW_FILE` will crash on the first
-> implementer iteration and must be migrated.
+## End-of-run JSON summary
 
-## Configuration
+Every exit (success or failure) prints one JSON object on a single line to
+stdout, as the **last** line of output. Pipe to `jq` to consume:
+
+```json
+{"run_dir": "/path/.rb-lite/runs/...", "exit_code": 0, "status": "clean", "rounds": 3, "implementer_iterations": 5, "noop_rounds_streak": 0, "duration_secs": 712, "config": {"max_rounds": 25, "max_iters": 25, "max_noop_rounds": 2, "min_findings_severity": "P2", "implement_timeout_secs": 14400}}
+```
+
+The human-readable `rb-lite clean after N round(s)` line is printed before
+the JSON on success; failure messages still go to stderr.
+
+## Configuration env vars
 
 - `RB_LITE_BASE`
 - `RB_LITE_MAX_ROUNDS`
@@ -124,59 +227,27 @@ disagreements between reviewers rather than seeing one merged blob.
 - `RB_LITE_MIN_FINDINGS_SEVERITY`
 - `RB_LITE_RUN_DIR`
 
-Run `bin/rb-lite --help` for the full option list.
-
-## Exit codes
-
-- `0` - clean: review panel reported no findings at or above the configured severity floor.
-- `2` - usage error: CLI parsing failure, invalid flag value, conflicting flags, or missing task file.
-- `3` - environment/preflight error: not in a git repo, branch creation failure, unavailable GNU `timeout` when requested, or failed run-dir/log setup.
-- `10` - implementer loop failed; rb-lite returns `10` for subprocess failures, timeouts that report `124` or `137`, or max implementer iterations before stabilization.
-- `11` - review panel failed because zero reviewers exited `0`, including missing or failing reviewer commands.
-- `12` - max rounds hit before the review panel was clean.
-- `13` - consensus failure: max no-op rounds reached while reviewers still reported findings.
-- `70` - internal rb-lite invariant or unexpected shell failure.
-
-## End-of-run JSON
-
-Every `rb-lite run` exit and command-line error exit prints one JSON object on a
-single stdout line as the last line of output. On success, the human-readable
-`rb-lite clean after ...` line is printed before the JSON. On failure, the
-error message is still printed to stderr, and the stdout JSON remains the final
-machine-readable summary. Help and no-args usage output do not emit a run
-summary.
-
-Schema:
-
-- `run_dir` (`string | null`) - absolute run artifact directory, or `null` if
-  rb-lite exited before creating one.
-- `exit_code` (`integer`) - actual process exit code.
-- `status` (`string`) - symbolic status matching `exit_code`: `clean`,
-  `usage_error`, `env_error`, `implementer_failed`, `review_panel_failed`,
-  `max_rounds_hit`, `consensus_failure`, or `internal_error`.
-  Signal-terminated runs preserve the actual signal exit code and report
-  `internal_error`.
-- `rounds` (`integer`) - review rounds completed; `0` before the first review
-  panel completes.
-- `implementer_iterations` (`integer`) - total implementer iterations started
-  across all rounds.
-- `noop_rounds_streak` (`integer`) - consecutive no-op implementer rounds at
-  exit.
-- `duration_secs` (`integer`) - wall-clock seconds from run-dir setup to exit,
-  or `0` if there was no run directory.
-- `config` (`object`) - selected runtime configuration:
-  `max_rounds` (`integer`), `max_iters` (`integer`),
-  `max_noop_rounds` (`integer`), `min_findings_severity` (`string`), and
-  `implement_timeout_secs` (`integer | null`).
-
-## Tests
+## Development
 
 ```bash
+# Enter a shell with bash, git, just, ripgrep
+nix develop
+
+# Run the smoke suite (fakes codex/claude — no API credentials needed)
 just test
+
+# Full local gate (lint + smoke + nix flake check)
+just check
 ```
 
-The smoke tests use fake implementer and reviewer commands on `PATH`; they do
-not require live model credentials.
+The smoke tests cover the loop's behavior with fake implementer and reviewer
+binaries on `PATH`. They do not exercise live codex/claude.
 
-Use `nix develop` to enter a shell with `just` and the basic development tools.
-Run `just check` for the full local gate, including `nix flake check`.
+## Notes
+
+- `rb-lite` was largely written by `rb-lite` itself, dogfood-style: the
+  implementer + reviewer panel iterated on its own source until each new
+  feature reached the new severity floor or no-op-stop conditions. The git
+  history shows each feature's dogfood signal in commit messages.
+- Sister project: [`ralph-burning`](https://github.com/douglaz/ralph-burning)
+  — same family of orchestration ideas, more substantial Rust implementation.
