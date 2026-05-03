@@ -156,8 +156,8 @@ fi
   assert_file_contains "$repo/env-review-files.txt" 'review-round-1-1\.md'
 }
 
-test_persistent_noop_implementer_stops_after_default_threshold() {
-  local repo run_dir
+test_persistent_noop_implementer_consensus_failure_after_default_threshold() {
+  local repo run_dir status
   local -a implementer_logs reviewer_logs
   repo=$(new_repo)
   run_dir="$repo/.rb-lite/noop-stop"
@@ -165,16 +165,34 @@ test_persistent_noop_implementer_stops_after_default_threshold() {
   write_fake "$repo" fake-reviewer 'printf "P1: persistent finding\n"'
   write_reviewers "$repo" fake-reviewer
 
+  status=0
   run_rb_lite "$repo" run --task "persistent noop" --max-rounds 5 --max-iters 1 \
-    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
 
   implementer_logs=("$run_dir"/implementer-round-*-iter-1.stdout)
   reviewer_logs=("$run_dir"/reviewer-round-*-1.stdout)
-  assert_file_contains /tmp/rb-lite-test.out 'rb-lite stopped after 2 no-op implementer round'
+  assert_equals 13 "$status" "no-op consensus failure exit"
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite consensus failure after 2 no-op implementer round'
   assert_file_contains /tmp/rb-lite-test.out 'reviewers still report findings'
   assert_equals 2 "${#implementer_logs[@]}" "no-op stop implementer count"
   assert_equals 2 "${#reviewer_logs[@]}" "no-op stop reviewer count"
   assert_file_contains "$run_dir/log.txt" 'no-op implementer streak is 2'
+}
+
+test_max_rounds_hit_exits_12() {
+  local repo status
+  repo=$(new_repo)
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "P1: persistent finding\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "max rounds" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 12 "$status" "max rounds exit"
+  assert_file_contains /tmp/rb-lite-test.err 'max rounds hit before review panel was clean'
 }
 
 test_default_severity_floor_ignores_p3_only_review() {
@@ -487,8 +505,52 @@ test_invalid_min_findings_severity_dies() {
   run_rb_lite "$repo" run --task "invalid floor" --min-findings-severity P9 \
     >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
 
-  [[ $status != 0 ]] || fail "invalid severity floor should fail rb-lite"
+  assert_equals 2 "$status" "invalid severity floor exit"
   assert_file_contains /tmp/rb-lite-test.err 'min-findings-severity must be one of P0, P1, P2, P3'
+}
+
+test_run_dir_setup_failure_exits_3() {
+  local repo status
+  repo=$(new_repo)
+  # Parent path is a regular file, so mkdir -p for the requested child fails.
+  printf 'not a directory\n' >"$repo/not-a-dir"
+
+  status=0
+  run_rb_lite "$repo" run --task "bad run dir" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'printf noop' --run-dir "$repo/not-a-dir/child" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 3 "$status" "run-dir setup failure exit"
+  assert_file_contains /tmp/rb-lite-test.err 'failed to create run directory'
+}
+
+test_run_log_setup_failure_exits_3() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/log-path-is-directory"
+  mkdir -p "$run_dir/log.txt"
+
+  status=0
+  run_rb_lite "$repo" run --task "bad run log" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'printf noop' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 3 "$status" "run-log setup failure exit"
+  assert_file_contains /tmp/rb-lite-test.err 'failed to initialize run log'
+}
+
+test_branch_creation_failure_exits_3() {
+  local repo status
+  repo=$(new_repo)
+  git -C "$repo" branch rb-lite-existing
+
+  status=0
+  run_rb_lite "$repo" run --task "existing branch" --branch rb-lite-existing \
+    --max-rounds 1 --max-iters 1 --implement-cmd 'printf noop' \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 3 "$status" "branch creation failure exit"
+  assert_file_contains /tmp/rb-lite-test.err 'failed to create and switch to branch: rb-lite-existing'
 }
 
 test_clean_review_exits_successfully() {
@@ -672,7 +734,7 @@ wait "$!"
     --implement-cmd 'fake-implementer' --implement-timeout 1 --run-dir "$run_dir" \
     >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
 
-  [[ $status != 0 ]] || fail "timed-out implementer should fail rb-lite"
+  assert_equals 10 "$status" "timed-out implementer exit"
   assert_file_contains /tmp/rb-lite-test.err 'implementer loop failed'
   assert_file_contains "$run_dir/log.txt" 'failed with exit 124'
   sleep_pid=$(cat "$repo/.rb-lite/sleep-pid")
@@ -695,7 +757,7 @@ test_env_implement_timeout_fails_stuck_iteration() {
       --implement-cmd 'fake-implementer' --run-dir "$run_dir"
   ) >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
 
-  [[ $status != 0 ]] || fail "env timed-out implementer should fail rb-lite"
+  assert_equals 10 "$status" "env timed-out implementer exit"
   assert_file_contains /tmp/rb-lite-test.err 'implementer loop failed'
   assert_file_contains "$run_dir/log.txt" 'failed with exit 124'
 }
@@ -727,7 +789,7 @@ test_implement_timeout_requires_gnu_timeout() {
     --implement-cmd 'printf noop' --implement-timeout 1 \
     >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
 
-  [[ $status != 0 ]] || fail "non-GNU timeout should fail validation"
+  assert_equals 3 "$status" "non-GNU timeout validation exit"
   assert_file_contains /tmp/rb-lite-test.err 'GNU coreutils timeout'
 }
 
@@ -925,7 +987,7 @@ printf "%s\n" "$count" >"$count_file"
   run_rb_lite "$repo" run --task "reviewer fails" --max-rounds 2 --max-iters 1 \
     --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
 
-  [[ $status != 0 ]] || fail "reviewer exit 2 should fail rb-lite"
+  assert_equals 11 "$status" "review panel failure exit"
   assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "reviewer failure implementer count"
   assert_file_contains /tmp/rb-lite-test.err 'review panel failed with exit 2'
 }
@@ -1085,7 +1147,8 @@ mkdir -p "$TMP_ROOT"
 test_implementer_stops_when_stable
 test_progress_log_mirrors_to_stderr
 test_p1_review_triggers_remediation_round
-test_persistent_noop_implementer_stops_after_default_threshold
+test_persistent_noop_implementer_consensus_failure_after_default_threshold
+test_max_rounds_hit_exits_12
 test_default_severity_floor_ignores_p3_only_review
 test_default_severity_floor_ignores_p3_body_that_mentions_p2
 test_default_severity_floor_triggers_on_p2_review
@@ -1096,6 +1159,9 @@ test_cli_min_findings_severity_overrides_env
 test_min_findings_severity_p1_ignores_p2_review
 test_min_findings_severity_p0_triggers_p0_review
 test_invalid_min_findings_severity_dies
+test_run_dir_setup_failure_exits_3
+test_run_log_setup_failure_exits_3
+test_branch_creation_failure_exits_3
 test_clean_review_exits_successfully
 test_default_implementer_uses_noninteractive_codex_exec
 test_implementer_session_resume_resets_at_round_boundary

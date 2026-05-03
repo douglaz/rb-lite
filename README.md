@@ -58,9 +58,9 @@ is a deliberate behavior change to avoid late-stage nit ratchets. Use
 the old behavior. Valid levels are exactly `P0`, `P1`, `P2`, and `P3`.
 
 To avoid spending repeated cycles on reviewer findings the implementer declines
-to change, rb-lite stops successfully after two consecutive no-op implementer
-rounds that still produce actionable reviewer findings. Configure this with
-`--max-noop-rounds N` or `RB_LITE_MAX_NOOP_ROUNDS`.
+to change, rb-lite stops with consensus failure after two consecutive no-op
+implementer rounds that still produce actionable reviewer findings. Configure
+this with `--max-noop-rounds N` or `RB_LITE_MAX_NOOP_ROUNDS`.
 
 The default reviewer panel runs two reviewers concurrently:
 
@@ -125,6 +125,17 @@ disagreements between reviewers rather than seeing one merged blob.
 - `RB_LITE_RUN_DIR`
 
 Run `bin/rb-lite --help` for the full option list.
+
+## Exit codes
+
+- `0` - clean: review panel reported no findings at or above the configured severity floor.
+- `2` - usage error: CLI parsing failure, invalid flag value, conflicting flags, or missing task file.
+- `3` - environment/preflight error: not in a git repo, branch creation failure, unavailable GNU `timeout` when requested, or failed run-dir/log setup.
+- `10` - implementer loop failed; rb-lite returns `10` for subprocess failures, timeouts that report `124` or `137`, or max implementer iterations before stabilization.
+- `11` - review panel failed because zero reviewers exited `0`, including missing or failing reviewer commands.
+- `12` - max rounds hit before the review panel was clean.
+- `13` - consensus failure: max no-op rounds reached while reviewers still reported findings.
+- `70` - internal rb-lite invariant or unexpected shell failure.
 
 ## Tests
 

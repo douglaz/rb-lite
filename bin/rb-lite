@@ -3,6 +3,20 @@ set -Eeuo pipefail
 
 PROGRAM=${0##*/}
 IMPLEMENT_TIMEOUT_KILL_AFTER=5s
+readonly EXIT_USAGE=2
+readonly EXIT_ENV=3
+readonly EXIT_IMPLEMENTER=10
+readonly EXIT_REVIEW_PANEL=11
+readonly EXIT_MAX_ROUNDS=12
+readonly EXIT_CONSENSUS=13
+readonly EXIT_INTERNAL=70
+
+unexpected_error() {
+  local rc=$? line=${BASH_LINENO[0]:-unknown}
+  printf '%s: internal error: unexpected command failed with exit %s near line %s\n' "$PROGRAM" "$rc" "$line" >&2
+  exit "$EXIT_INTERNAL"
+}
+trap unexpected_error ERR
 
 DEFAULT_PROMPT=$'Read AGENTS.md if present. If a review file is provided, address the findings\nin that review. Otherwise implement the requested work. Stop when no code or\ntest changes are needed.'
 
@@ -87,12 +101,28 @@ newline-separated list of per-reviewer markdown paths (one file per reviewer,
 written as review-round-N-K.md). The implementer is told via PROMPT to read
 each one. The legacy REVIEW_FILE env var has been removed; legacy
 --implement-cmd wrappers must read REVIEW_FILES instead.
+
+Exit codes:
+  0   Clean review panel.
+  2   Usage error, including invalid flags or missing task files.
+  3   Environment/preflight error, including git repo, branch creation, GNU timeout, or run-dir/log setup.
+  10  Implementer loop failed; subprocess failures, timeouts, and max-iters are normalized to 10.
+  11  Review panel failed because zero reviewers exited 0.
+  12  Max rounds hit before clean review.
+  13  Consensus failure after repeated no-op implementer rounds with findings.
+  70  Internal rb-lite invariant or unexpected shell failure.
 EOF
 }
 
-die() {
+die_with() {
+  local code=$1
+  shift
   printf '%s: %s\n' "$PROGRAM" "$*" >&2
-  exit 1
+  exit "$code"
+}
+
+die() {
+  die_with "$EXIT_USAGE" "$@"
 }
 
 log_msg() {
@@ -524,9 +554,9 @@ run_command() {
   FINDINGS_SEVERITY_PATTERN=$findings_severity_pattern
   ACTIONABLE_FINDINGS_SEVERITIES=$actionable_findings_severities
   if [[ -n $implement_timeout ]]; then
-    command -v timeout >/dev/null || die "--implement-timeout requires GNU coreutils timeout"
+    command -v timeout >/dev/null || die_with "$EXIT_ENV" "--implement-timeout requires GNU coreutils timeout"
     timeout --version 2>/dev/null | grep -q 'GNU coreutils' \
-      || die "--implement-timeout requires GNU coreutils timeout"
+      || die_with "$EXIT_ENV" "--implement-timeout requires GNU coreutils timeout"
   fi
   [[ -n $task && -n $task_file ]] && die "use either --task or --task-file, not both"
   if [[ -n $task_file ]]; then
@@ -534,15 +564,16 @@ run_command() {
     task=$(cat "$task_file")
   fi
 
-  root=$(git rev-parse --show-toplevel 2>/dev/null) || die "not in a git repository"
-  cd "$root"
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || die_with "$EXIT_ENV" "not in a git repository"
+  cd "$root" || die_with "$EXIT_ENV" "failed to enter git repository root: $root"
   if [[ -n $branch ]]; then
-    git switch -c "$branch"
+    git switch -c "$branch" || die_with "$EXIT_ENV" "failed to create and switch to branch: $branch"
   fi
 
-  RUN_DIR=$(make_run_dir "$root" "$requested_run_dir")
+  RUN_DIR=$(make_run_dir "$root" "$requested_run_dir") \
+    || die_with "$EXIT_ENV" "failed to create run directory"
   LOG_FILE="$RUN_DIR/log.txt"
-  : >"$LOG_FILE"
+  : >"$LOG_FILE" || die_with "$EXIT_ENV" "failed to initialize run log: $LOG_FILE"
   log_msg "run directory: $RUN_DIR"
   log_msg "base: $base"
   log_msg "max rounds: $max_rounds; max no-op rounds: $max_noop_rounds; max implementer iterations: $max_iters"
@@ -553,7 +584,7 @@ run_command() {
   while (( round <= max_rounds )); do
     round_before=$(fingerprint_git_state "$root")
     if ! run_implementer_loop "$root" "$round" "$max_iters" "$implement_timeout" "$implement_cmd" "$task" "${review_paths[@]}"; then
-      die "implementer loop failed; see $RUN_DIR"
+      die_with "$EXIT_IMPLEMENTER" "implementer loop failed; see $RUN_DIR"
     fi
     round_after=$(fingerprint_git_state "$root")
     if [[ $round_before == "$round_after" ]]; then
@@ -563,7 +594,7 @@ run_command() {
     fi
 
     if ! run_review_panel "$root" "$round" "$base" "$reviewers_file"; then
-      die "review panel failed with exit $REVIEW_PANEL_FAILURE_EXIT; see $RUN_DIR"
+      die_with "$EXIT_REVIEW_PANEL" "review panel failed with exit $REVIEW_PANEL_FAILURE_EXIT; see $RUN_DIR"
     fi
 
     case $REVIEW_PANEL_RESULT in
@@ -573,20 +604,20 @@ run_command() {
         ;;
       findings)
         if (( noop_round_streak >= max_noop_rounds )); then
-          log_msg "round $round no-op implementer streak is $noop_round_streak (threshold $max_noop_rounds); stopping with reviewer findings"
-          printf 'rb-lite stopped after %s no-op implementer round(s); reviewers still report findings but implementer is not changing state. Artifacts: %s\n' "$noop_round_streak" "$RUN_DIR"
-          exit 0
+          log_msg "round $round no-op implementer streak is $noop_round_streak (threshold $max_noop_rounds); consensus failure with reviewer findings"
+          printf 'rb-lite consensus failure after %s no-op implementer round(s); reviewers still report findings but implementer is not changing state. Artifacts: %s\n' "$noop_round_streak" "$RUN_DIR"
+          exit "$EXIT_CONSENSUS"
         fi
         review_paths=("${REVIEW_FILES_PATHS[@]}")
         ((round++))
         ;;
       *)
-        die "review panel ended in unexpected state '$REVIEW_PANEL_RESULT'; see $RUN_DIR"
+        die_with "$EXIT_INTERNAL" "review panel ended in unexpected state '$REVIEW_PANEL_RESULT'; see $RUN_DIR"
         ;;
     esac
   done
 
-  die "max rounds hit before review panel was clean; see $RUN_DIR"
+  die_with "$EXIT_MAX_ROUNDS" "max rounds hit before review panel was clean; see $RUN_DIR"
 }
 
 main() {
