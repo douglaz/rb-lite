@@ -21,6 +21,30 @@ assert_file_contains() {
   grep -Eq "$pattern" "$file" || fail "expected $file to match $pattern"
 }
 
+assert_last_stdout_summary() {
+  local file=$1
+  local status=$2
+  local exit_code=$3
+  local last
+
+  [[ -f $file ]] || fail "missing file: $file"
+  last=$(tail -n 1 "$file")
+  [[ $last == \{*\} ]] || fail "last stdout line is not a JSON object: $last"
+  printf '%s\n' "$last" | grep -Fq "\"status\": \"$status\"" \
+    || fail "summary missing status $status: $last"
+  printf '%s\n' "$last" | grep -Fq "\"exit_code\": $exit_code" \
+    || fail "summary missing exit_code $exit_code: $last"
+}
+
+assert_no_stdout_summary() {
+  local file=$1
+  local last
+
+  [[ -f $file ]] || fail "missing file: $file"
+  last=$(tail -n 1 "$file")
+  [[ $last != \{*\} ]] || fail "unexpected JSON summary line: $last"
+}
+
 assert_equals() {
   local expected=$1
   local actual=$2
@@ -175,6 +199,7 @@ test_persistent_noop_implementer_consensus_failure_after_default_threshold() {
   assert_equals 13 "$status" "no-op consensus failure exit"
   assert_file_contains /tmp/rb-lite-test.out 'rb-lite consensus failure after 2 no-op implementer round'
   assert_file_contains /tmp/rb-lite-test.out 'reviewers still report findings'
+  assert_last_stdout_summary /tmp/rb-lite-test.out consensus_failure 13
   assert_equals 2 "${#implementer_logs[@]}" "no-op stop implementer count"
   assert_equals 2 "${#reviewer_logs[@]}" "no-op stop reviewer count"
   assert_file_contains "$run_dir/log.txt" 'no-op implementer streak is 2'
@@ -507,6 +532,29 @@ test_invalid_min_findings_severity_dies() {
 
   assert_equals 2 "$status" "invalid severity floor exit"
   assert_file_contains /tmp/rb-lite-test.err 'min-findings-severity must be one of P0, P1, P2, P3'
+  assert_last_stdout_summary /tmp/rb-lite-test.out usage_error 2
+}
+
+test_help_output_does_not_emit_run_summary() {
+  local status
+
+  status=0
+  "$ROOT/bin/rb-lite" >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+  assert_equals 0 "$status" "no-args usage exit"
+  assert_file_contains /tmp/rb-lite-test.out '^Usage:'
+  assert_no_stdout_summary /tmp/rb-lite-test.out
+
+  status=0
+  "$ROOT/bin/rb-lite" --help >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+  assert_equals 0 "$status" "top-level help exit"
+  assert_file_contains /tmp/rb-lite-test.out '^Usage:'
+  assert_no_stdout_summary /tmp/rb-lite-test.out
+
+  status=0
+  "$ROOT/bin/rb-lite" run --help >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+  assert_equals 0 "$status" "run help exit"
+  assert_file_contains /tmp/rb-lite-test.out '^Usage:'
+  assert_no_stdout_summary /tmp/rb-lite-test.out
 }
 
 test_run_dir_setup_failure_exits_3() {
@@ -522,6 +570,7 @@ test_run_dir_setup_failure_exits_3() {
 
   assert_equals 3 "$status" "run-dir setup failure exit"
   assert_file_contains /tmp/rb-lite-test.err 'failed to create run directory'
+  assert_last_stdout_summary /tmp/rb-lite-test.out env_error 3
 }
 
 test_run_log_setup_failure_exits_3() {
@@ -564,6 +613,7 @@ test_clean_review_exits_successfully() {
     --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out
 
   assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_last_stdout_summary /tmp/rb-lite-test.out clean 0
 }
 
 test_default_implementer_uses_noninteractive_codex_exec() {
@@ -760,6 +810,24 @@ test_env_implement_timeout_fails_stuck_iteration() {
   assert_equals 10 "$status" "env timed-out implementer exit"
   assert_file_contains /tmp/rb-lite-test.err 'implementer loop failed'
   assert_file_contains "$run_dir/log.txt" 'failed with exit 124'
+}
+
+test_signal_summary_preserves_signal_exit_code() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/signal-run"
+  write_fake "$repo" fake-implementer 'sleep 30'
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" timeout --preserve-status --kill-after=2s 1s \
+      "$repo/bin/rb-lite" run --task "signal" --max-rounds 1 --max-iters 1 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir"
+  ) >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 143 "$status" "signal termination exit"
+  assert_last_stdout_summary /tmp/rb-lite-test.out internal_error 143
 }
 
 test_cli_implement_timeout_overrides_invalid_env() {
@@ -990,6 +1058,7 @@ printf "%s\n" "$count" >"$count_file"
   assert_equals 11 "$status" "review panel failure exit"
   assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "reviewer failure implementer count"
   assert_file_contains /tmp/rb-lite-test.err 'review panel failed with exit 2'
+  assert_last_stdout_summary /tmp/rb-lite-test.out review_panel_failed 11
 }
 
 test_reviewer_stderr_excluded_from_combined_when_clean() {
@@ -1159,6 +1228,7 @@ test_cli_min_findings_severity_overrides_env
 test_min_findings_severity_p1_ignores_p2_review
 test_min_findings_severity_p0_triggers_p0_review
 test_invalid_min_findings_severity_dies
+test_help_output_does_not_emit_run_summary
 test_run_dir_setup_failure_exits_3
 test_run_log_setup_failure_exits_3
 test_branch_creation_failure_exits_3
@@ -1169,6 +1239,7 @@ test_implementer_session_resume_picks_first_match
 test_env_implement_cmd_override_still_wins
 test_implement_timeout_fails_stuck_iteration
 test_env_implement_timeout_fails_stuck_iteration
+test_signal_summary_preserves_signal_exit_code
 test_cli_implement_timeout_overrides_invalid_env
 test_implement_timeout_requires_gnu_timeout
 test_untracked_files_affect_stability

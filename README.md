@@ -137,6 +137,38 @@ Run `bin/rb-lite --help` for the full option list.
 - `13` - consensus failure: max no-op rounds reached while reviewers still reported findings.
 - `70` - internal rb-lite invariant or unexpected shell failure.
 
+## End-of-run JSON
+
+Every `rb-lite run` exit and command-line error exit prints one JSON object on a
+single stdout line as the last line of output. On success, the human-readable
+`rb-lite clean after ...` line is printed before the JSON. On failure, the
+error message is still printed to stderr, and the stdout JSON remains the final
+machine-readable summary. Help and no-args usage output do not emit a run
+summary.
+
+Schema:
+
+- `run_dir` (`string | null`) - absolute run artifact directory, or `null` if
+  rb-lite exited before creating one.
+- `exit_code` (`integer`) - actual process exit code.
+- `status` (`string`) - symbolic status matching `exit_code`: `clean`,
+  `usage_error`, `env_error`, `implementer_failed`, `review_panel_failed`,
+  `max_rounds_hit`, `consensus_failure`, or `internal_error`.
+  Signal-terminated runs preserve the actual signal exit code and report
+  `internal_error`.
+- `rounds` (`integer`) - review rounds completed; `0` before the first review
+  panel completes.
+- `implementer_iterations` (`integer`) - total implementer iterations started
+  across all rounds.
+- `noop_rounds_streak` (`integer`) - consecutive no-op implementer rounds at
+  exit.
+- `duration_secs` (`integer`) - wall-clock seconds from run-dir setup to exit,
+  or `0` if there was no run directory.
+- `config` (`object`) - selected runtime configuration:
+  `max_rounds` (`integer`), `max_iters` (`integer`),
+  `max_noop_rounds` (`integer`), `min_findings_severity` (`string`), and
+  `implement_timeout_secs` (`integer | null`).
+
 ## Tests
 
 ```bash

@@ -102,6 +102,9 @@ written as review-round-N-K.md). The implementer is told via PROMPT to read
 each one. The legacy REVIEW_FILE env var has been removed; legacy
 --implement-cmd wrappers must read REVIEW_FILES instead.
 
+Every run exit and command-line error exit prints a single JSON summary object
+as the final stdout line. See README.md for the schema.
+
 Exit codes:
   0   Clean review panel.
   2   Usage error, including invalid flags or missing task files.
@@ -131,6 +134,67 @@ log_msg() {
 
 is_positive_int() {
   [[ ${1:-} =~ ^[1-9][0-9]*$ ]]
+}
+
+json_escape() {
+  local s=${1:-}
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+emit_exit_summary() {
+  local rc=$1 now duration run_dir_json timeout_json status min_severity_json
+  trap - ERR
+  set +e
+  [[ ${SUMMARY_ENABLED:-0} == 1 ]] || return 0
+
+  if [[ -n ${SUMMARY_STATUS:-} ]]; then
+    status=$SUMMARY_STATUS
+  else
+    case $rc in
+      "$EXIT_USAGE") status=usage_error ;;
+      "$EXIT_ENV") status=env_error ;;
+      "$EXIT_IMPLEMENTER") status=implementer_failed ;;
+      "$EXIT_REVIEW_PANEL") status=review_panel_failed ;;
+      "$EXIT_MAX_ROUNDS") status=max_rounds_hit ;;
+      "$EXIT_CONSENSUS") status=consensus_failure ;;
+      *) status=internal_error ;;
+    esac
+  fi
+
+  duration=0
+  if [[ -n ${SUMMARY_STARTED_AT:-} ]]; then
+    now=$(date -u +%s 2>/dev/null)
+    duration=$((now - SUMMARY_STARTED_AT))
+    ((duration >= 0)) || duration=0
+  fi
+
+  run_dir_json=null
+  [[ -z ${RUN_DIR:-} ]] || run_dir_json=\"$(json_escape "$RUN_DIR")\"
+  timeout_json=null
+  [[ -z ${SUMMARY_IMPLEMENT_TIMEOUT_SECS:-} ]] || timeout_json=$SUMMARY_IMPLEMENT_TIMEOUT_SECS
+
+  min_severity_json=$(json_escape "${SUMMARY_MIN_FINDINGS_SEVERITY:-P2}")
+  printf '{"run_dir": %s, "exit_code": %s, "status": "%s", "rounds": %s, "implementer_iterations": %s, "noop_rounds_streak": %s, "duration_secs": %s, "config": {"max_rounds": %s, "max_iters": %s, "max_noop_rounds": %s, "min_findings_severity": "%s", "implement_timeout_secs": %s}}\n' \
+    "$run_dir_json" "$rc" "$status" "${SUMMARY_ROUNDS:-0}" "${SUMMARY_IMPLEMENTER_ITERATIONS:-0}" \
+    "${SUMMARY_NOOP_ROUNDS_STREAK:-0}" "$duration" "${SUMMARY_MAX_ROUNDS:-25}" \
+    "${SUMMARY_MAX_ITERS:-25}" "${SUMMARY_MAX_NOOP_ROUNDS:-2}" "$min_severity_json" "$timeout_json"
+}
+
+handle_signal() {
+  local signal_name=$1
+  local signal_number=$2
+  local pid
+  trap - "$signal_name"
+  SUMMARY_STATUS=internal_error
+  for pid in "${ACTIVE_CHILD_PIDS[@]}"; do
+    kill -"$signal_name" "$pid" 2>/dev/null || true
+  done
+  exit $((128 + signal_number))
 }
 
 make_run_dir() {
@@ -250,15 +314,19 @@ run_implementer_loop() {
     stdout="$RUN_DIR/implementer-round-${round}-iter-${iter}.stdout"
     stderr="$RUN_DIR/implementer-round-${round}-iter-${iter}.stderr"
     log_msg "round $round implementer iteration $iter starting"
+    SUMMARY_IMPLEMENTER_ITERATIONS=$((SUMMARY_IMPLEMENTER_ITERATIONS + 1))
 
-    if (
+    (
       cd "$root"
       RB_LITE_PREV_SESSION=$prev_session PROMPT=$prompt REVIEW_FILES=$review_files_env RUN_DIR=$RUN_DIR ROUND=$round ITERATION=$iter "${implementer_argv[@]}"
-    ) >"$stdout" 2>"$stderr"; then
+    ) >"$stdout" 2>"$stderr" &
+    ACTIVE_CHILD_PIDS=("$!")
+    if wait "$!"; then
       rc=0
     else
       rc=$?
     fi
+    ACTIVE_CHILD_PIDS=()
 
     prev_session=
     if [[ -n $session_regex ]]; then
@@ -400,6 +468,7 @@ run_review_panel() {
     pids+=("$!")
   done
 
+  ACTIVE_CHILD_PIDS=("${pids[@]}")
   failed=0
   succeeded=0
   for pid in "${pids[@]}"; do
@@ -412,8 +481,10 @@ run_review_panel() {
     fi
     REVIEWER_RCS+=("$rc")
   done
+  ACTIVE_CHILD_PIDS=()
 
   write_review_files "$round" "$count"
+  SUMMARY_ROUNDS=$round
 
   if (( succeeded == 0 )); then
     log_msg "round $round review panel failed: 0 of $count reviewers succeeded (last exit $failed)"
@@ -524,6 +595,7 @@ run_command() {
         shift 2
         ;;
       -h|--help)
+        SUMMARY_ENABLED=0
         usage
         exit 0
         ;;
@@ -545,6 +617,11 @@ run_command() {
     P3) findings_severity_digits=0-3; actionable_findings_severities=P0/P1/P2/P3 ;;
     *) die "--min-findings-severity must be one of P0, P1, P2, P3" ;;
   esac
+  SUMMARY_MAX_ROUNDS=$max_rounds
+  SUMMARY_MAX_ITERS=$max_iters
+  SUMMARY_MAX_NOOP_ROUNDS=$max_noop_rounds
+  SUMMARY_MIN_FINDINGS_SEVERITY=$min_findings_severity
+  SUMMARY_IMPLEMENT_TIMEOUT_SECS=$implement_timeout
   # Line tags cover the canonical reviewer examples in tests; the fallback
   # handles common "Issue 1 (P2): ..." style parenthesized severities.
   findings_line_tag="${findings_tag_prefix}(${findings_tag_marker}\\[P[${findings_severity_digits}]\\]${findings_tag_marker}${findings_tag_boundary}?|${findings_tag_marker}P[${findings_severity_digits}]${findings_tag_sep}${findings_tag_marker}${findings_tag_boundary}?|${findings_tag_marker}P[${findings_severity_digits}]${findings_tag_marker}${findings_tag_boundary})"
@@ -572,6 +649,7 @@ run_command() {
 
   RUN_DIR=$(make_run_dir "$root" "$requested_run_dir") \
     || die_with "$EXIT_ENV" "failed to create run directory"
+  SUMMARY_STARTED_AT=$(date -u +%s)
   LOG_FILE="$RUN_DIR/log.txt"
   : >"$LOG_FILE" || die_with "$EXIT_ENV" "failed to initialize run log: $LOG_FILE"
   log_msg "run directory: $RUN_DIR"
@@ -592,6 +670,7 @@ run_command() {
     else
       noop_round_streak=0
     fi
+    SUMMARY_NOOP_ROUNDS_STREAK=$noop_round_streak
 
     if ! run_review_panel "$root" "$round" "$base" "$reviewers_file"; then
       die_with "$EXIT_REVIEW_PANEL" "review panel failed with exit $REVIEW_PANEL_FAILURE_EXIT; see $RUN_DIR"
@@ -599,6 +678,7 @@ run_command() {
 
     case $REVIEW_PANEL_RESULT in
       clean)
+        SUMMARY_STATUS=clean
         printf 'rb-lite clean after %s round(s). Artifacts: %s\n' "$round" "$RUN_DIR"
         exit 0
         ;;
@@ -628,6 +708,7 @@ main() {
 
   case $1 in
     run)
+      SUMMARY_ENABLED=1
       shift
       run_command "$@"
       ;;
@@ -635,6 +716,7 @@ main() {
       usage
       ;;
     *)
+      SUMMARY_ENABLED=1
       die "unknown command: $1"
       ;;
   esac
@@ -647,8 +729,25 @@ REVIEW_PANEL_FAILURE_EXIT=0
 MIN_FINDINGS_SEVERITY=
 FINDINGS_SEVERITY_PATTERN=
 ACTIONABLE_FINDINGS_SEVERITIES=
+SUMMARY_ENABLED=0
+SUMMARY_STATUS=
+SUMMARY_STARTED_AT=
+SUMMARY_ROUNDS=0
+SUMMARY_IMPLEMENTER_ITERATIONS=0
+SUMMARY_NOOP_ROUNDS_STREAK=0
+SUMMARY_MAX_ROUNDS=25
+SUMMARY_MAX_ITERS=25
+SUMMARY_MAX_NOOP_ROUNDS=2
+SUMMARY_MIN_FINDINGS_SEVERITY=P2
+SUMMARY_IMPLEMENT_TIMEOUT_SECS=14400
+declare -a ACTIVE_CHILD_PIDS
 declare -a REVIEWERS
 declare -a REVIEWER_RCS
 declare -a REVIEW_FILES_PATHS
 
+trap 'handle_signal HUP 1' HUP
+trap 'handle_signal INT 2' INT
+trap 'handle_signal QUIT 3' QUIT
+trap 'handle_signal TERM 15' TERM
+trap 'emit_exit_summary "$?"' EXIT
 main "$@"
