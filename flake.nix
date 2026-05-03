@@ -56,6 +56,7 @@
             meta = {
               description = "Minimal Bash CLI for an implement/review loop driven by codex + claude";
               homepage = "https://github.com/douglaz/rb-lite";
+              license = pkgs.lib.licenses.mit;
               platforms = pkgs.lib.platforms.unix;
               mainProgram = "rb-lite";
             };
