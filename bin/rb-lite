@@ -28,6 +28,10 @@ Options:
   --implement-cmd CMD     Implementer shell command. Default: RB_LITE_IMPLEMENT_CMD or
                           codex exec, resuming same-round sessions when available.
   --reviewers-file PATH   Reviewer command file. Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
+  --min-findings-severity LEVEL
+                          Minimum reviewer finding severity that triggers another round.
+                          One of P0, P1, P2, P3. Default:
+                          RB_LITE_MIN_FINDINGS_SEVERITY or P2.
   --run-dir PATH          Store run artifacts in PATH. Default: RB_LITE_RUN_DIR or .rb-lite/runs/<id>.
   --branch NAME           Create and switch to NAME before running.
   -h, --help              Show this help.
@@ -42,6 +46,8 @@ Environment:
   RB_LITE_PREV_SESSION    Exported to the implementer with the prior same-round session ID.
   RB_LITE_SESSION_REGEX   Bash ERE for session IDs in implementer stderr; empty disables capture.
   RB_LITE_REVIEWERS_FILE  File with one reviewer shell command per non-comment line.
+  RB_LITE_MIN_FINDINGS_SEVERITY
+                          Default minimum reviewer finding severity. Default: P2.
   RB_LITE_RUN_DIR         Explicit run artifact directory.
 
 The default implementer starts with codex exec using noninteractive flags, then
@@ -50,6 +56,11 @@ round after capturing a session ID from stderr. Override RB_LITE_SESSION_REGEX
 to support non-codex session ID formats, or set it empty to disable capture.
 The first capture group is used, or the full match when no group is present; no
 match or an empty capture leaves RB_LITE_PREV_SESSION empty.
+
+By default, only P0/P1/P2 reviewer findings trigger another implementer round;
+this is a deliberate behavior change, so P3-only output is considered clean.
+Use --min-findings-severity P3 or RB_LITE_MIN_FINDINGS_SEVERITY=P3 to preserve
+the old strict P3 behavior.
 
 Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
 two-reviewer panel:
@@ -167,7 +178,7 @@ build_prompt() {
     for p in "${review_paths[@]}"; do
       printf '  %s\n' "$p"
     done
-    printf 'Address the actionable P0/P1/P2/P3 findings across these reviews, then stop when no code or test changes are needed.\n'
+    printf 'Address the actionable %s findings across these reviews, then stop when no code or test changes are needed.\n' "${ACTIONABLE_FINDINGS_SEVERITIES:-P0/P1/P2}"
   fi
 }
 
@@ -322,7 +333,7 @@ review_has_findings() {
     (( rc == 0 )) || continue
     stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
     [[ -f $stdout ]] || continue
-    if grep -Eq '(^|[^[:alnum:]_])P[0-3]([^[:alnum:]_]|$)' "$stdout"; then
+    if grep -Eq "$FINDINGS_SEVERITY_PATTERN" "$stdout"; then
       return 0
     fi
   done
@@ -382,12 +393,12 @@ run_review_panel() {
   fi
 
   if review_has_findings "$round" "$count"; then
-    log_msg "round $round review panel reported actionable findings"
+    log_msg "round $round review panel reported actionable findings (floor $MIN_FINDINGS_SEVERITY)"
     REVIEW_PANEL_RESULT=findings
     return 0
   fi
 
-  log_msg "round $round review panel clean"
+  log_msg "round $round review panel clean (floor $MIN_FINDINGS_SEVERITY)"
   REVIEW_PANEL_RESULT=clean
   return 0
 }
@@ -399,6 +410,16 @@ run_command() {
   local implement_timeout=${RB_LITE_IMPLEMENT_TIMEOUT:-}
   local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'}
   local reviewers_file=${RB_LITE_REVIEWERS_FILE:-.rb-lite-reviewers}
+  local min_findings_severity=${RB_LITE_MIN_FINDINGS_SEVERITY:-P2}
+  local findings_severity_pattern=
+  local findings_severity_digits=
+  local actionable_findings_severities=
+  local findings_tag_prefix='^[[:space:]]*([-*+][[:space:]]*|[0-9]+[.)][[:space:]]*|#{1,6}[[:space:]]*|"?[Tt][Ii][Tt][Ll][Ee]"?[[:space:]]*:[[:space:]]*"?)?'
+  local findings_tag_marker='([`][`]?|[*][*])?'
+  local findings_tag_sep='([[:space:]]*[:,.)-]|[[:space:]]*[(])'
+  local findings_tag_boundary='([[:space:]]*[:,.)-]|[[:space:]]*[(]|[[:space:]]+|$)'
+  local findings_line_tag=
+  local findings_paren_tag=
   local requested_run_dir=${RB_LITE_RUN_DIR:-}
   local task=
   local task_file=
@@ -448,6 +469,11 @@ run_command() {
         reviewers_file=$2
         shift 2
         ;;
+      --min-findings-severity)
+        (($# >= 2)) || die "--min-findings-severity requires a value"
+        min_findings_severity=$2
+        shift 2
+        ;;
       --run-dir)
         (($# >= 2)) || die "--run-dir requires a value"
         requested_run_dir=$2
@@ -472,6 +498,21 @@ run_command() {
   is_positive_int "$max_iters" || die "--max-iters must be a positive integer"
   [[ -z $implement_timeout ]] || is_positive_int "$implement_timeout" \
     || die "--implement-timeout must be a positive integer number of seconds"
+  case $min_findings_severity in
+    P0) findings_severity_digits=0; actionable_findings_severities=P0 ;;
+    P1) findings_severity_digits=0-1; actionable_findings_severities=P0/P1 ;;
+    P2) findings_severity_digits=0-2; actionable_findings_severities=P0/P1/P2 ;;
+    P3) findings_severity_digits=0-3; actionable_findings_severities=P0/P1/P2/P3 ;;
+    *) die "--min-findings-severity must be one of P0, P1, P2, P3" ;;
+  esac
+  # Line tags cover the canonical reviewer examples in tests; the fallback
+  # handles common "Issue 1 (P2): ..." style parenthesized severities.
+  findings_line_tag="${findings_tag_prefix}(${findings_tag_marker}\\[P[${findings_severity_digits}]\\]${findings_tag_marker}${findings_tag_boundary}?|${findings_tag_marker}P[${findings_severity_digits}]${findings_tag_sep}${findings_tag_marker}${findings_tag_boundary}?|${findings_tag_marker}P[${findings_severity_digits}]${findings_tag_marker}${findings_tag_boundary})"
+  findings_paren_tag='^[[:space:]]*([-*+][[:space:]]*|[0-9]+[.)][[:space:]]*|#{1,6}[[:space:]]*)?([[:alpha:]]+[[:space:]]+[0-9]+[[:space:]]*)?[(]P['"${findings_severity_digits}"'][)]([[:space:]]+|[[:space:]]*[:,.)-]|$)'
+  findings_severity_pattern="${findings_line_tag}|${findings_paren_tag}"
+  MIN_FINDINGS_SEVERITY=$min_findings_severity
+  FINDINGS_SEVERITY_PATTERN=$findings_severity_pattern
+  ACTIONABLE_FINDINGS_SEVERITIES=$actionable_findings_severities
   if [[ -n $implement_timeout ]]; then
     command -v timeout >/dev/null || die "--implement-timeout requires GNU coreutils timeout"
     timeout --version 2>/dev/null | grep -q 'GNU coreutils' \
@@ -549,6 +590,9 @@ RUN_DIR=
 LOG_FILE=
 REVIEW_PANEL_RESULT=
 REVIEW_PANEL_FAILURE_EXIT=0
+MIN_FINDINGS_SEVERITY=
+FINDINGS_SEVERITY_PATTERN=
+ACTIONABLE_FINDINGS_SEVERITIES=
 declare -a REVIEWERS
 declare -a REVIEWER_RCS
 declare -a REVIEW_FILES_PATHS

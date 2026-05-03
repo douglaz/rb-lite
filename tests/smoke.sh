@@ -124,7 +124,7 @@ count=0
 count=$((count + 1))
 printf "%s\n" "$count" >"$count_file"
 if (( count == 1 )); then
-  printf "P1: fix the issue\n"
+  printf "\"Title\": \"[P1] fix the issue\"\n"
 else
   printf "No findings\n"
 fi
@@ -137,6 +137,320 @@ fi
   assert_equals 3 "$(cat "$repo/.rb-lite/implementer-count")" "remediation implementer count"
   assert_file_contains "$repo/remediated.txt" 'saw review'
   assert_file_contains "$repo/env-review-files.txt" 'review-round-1-1\.md'
+}
+
+test_default_severity_floor_ignores_p3_only_review() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/p3-default-clean"
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+'
+  write_fake "$repo" fake-reviewer 'printf "P3: trailing whitespace nit in docs/readme.md\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "p3 should not loop by default" --max-rounds 2 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "P3 default implementer count"
+  assert_file_contains "$run_dir/log.txt" 'review panel clean \(floor P2\)'
+}
+
+test_default_severity_floor_ignores_p3_body_that_mentions_p2() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/p3-body-p2-default-clean"
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+'
+  write_fake "$repo" fake-reviewer 'printf "P3: clarify (P2) floor docs\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "p3 body mentions p2" --max-rounds 2 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "P3 body P2 default implementer count"
+  assert_file_contains "$run_dir/log.txt" 'review panel clean \(floor P2\)'
+}
+
+test_default_severity_floor_triggers_on_p2_review() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/p2-default-findings"
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if [[ $PROMPT == *"Review files"* ]]; then
+  printf "saw P2 review\n" >remediated.txt
+  printf "%s\n" "$PROMPT" >remediation-prompt.txt
+fi
+'
+  write_fake "$repo" fake-reviewer '
+mkdir -p .rb-lite
+count_file=.rb-lite/reviewer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "P2 useful cleanup\n"
+else
+  printf "No findings.\n"
+fi
+'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "p2 should loop by default" --max-rounds 2 --max-iters 2 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 2 round'
+  assert_equals 3 "$(cat "$repo/.rb-lite/implementer-count")" "P2 default implementer count"
+  assert_file_contains "$repo/remediated.txt" 'saw P2 review'
+  assert_file_contains "$repo/remediation-prompt.txt" 'Address the actionable P0/P1/P2 findings'
+  if grep -q 'P0/P1/P2/P3 findings' "$repo/remediation-prompt.txt"; then
+    fail "default remediation prompt should not tell implementer to address P3 findings"
+  fi
+  assert_file_contains "$run_dir/log.txt" 'actionable findings \(floor P2\)'
+}
+
+test_severity_detection_accepts_common_reviewer_tag_formats() {
+  local repo sample
+  local -a samples=(
+    'P2: bare colon finding'
+    '- **P2:** markdown-bold finding'
+    '**P2**: markdown-bold finding'
+    'P2 (nice-to-have): finding'
+    '## P2: heading finding'
+    'P2, comma finding'
+    '`P2`: backtick finding'
+    '(P2) parenthesized finding'
+    'Issue 1 (P2): parenthesized issue finding'
+  )
+
+  for sample in "${samples[@]}"; do
+    repo=$(new_repo)
+    mkdir -p "$repo/.rb-lite"
+    printf "%s\n" "$sample" >"$repo/.rb-lite/reviewer-output"
+    write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+'
+    write_fake "$repo" fake-reviewer '
+mkdir -p .rb-lite
+count_file=.rb-lite/reviewer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  cat .rb-lite/reviewer-output
+else
+  printf "No findings.\n"
+fi
+'
+    write_reviewers "$repo" fake-reviewer
+
+    run_rb_lite "$repo" run --task "common severity format" --max-rounds 2 --max-iters 1 \
+      --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out
+
+    assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 2 round'
+    assert_equals 2 "$(cat "$repo/.rb-lite/implementer-count")" "severity format '$sample' implementer count"
+  done
+}
+
+test_min_findings_severity_p3_triggers_p3_review() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if [[ $PROMPT == *"Review files"* ]]; then
+  printf "saw P3 review\n" >remediated.txt
+fi
+'
+  write_fake "$repo" fake-reviewer '
+mkdir -p .rb-lite
+count_file=.rb-lite/reviewer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "P3: strict nit\n"
+else
+  printf "No findings.\n"
+fi
+'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "strict p3" --max-rounds 2 --max-iters 2 \
+    --implement-cmd 'fake-implementer' --min-findings-severity P3 >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 2 round'
+  assert_equals 3 "$(cat "$repo/.rb-lite/implementer-count")" "P3 strict implementer count"
+  assert_file_contains "$repo/remediated.txt" 'saw P3 review'
+}
+
+test_env_min_findings_severity_p3_triggers_p3_review() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if [[ $PROMPT == *"Review files"* ]]; then
+  printf "saw env P3 review\n" >remediated.txt
+fi
+'
+  write_fake "$repo" fake-reviewer '
+mkdir -p .rb-lite
+count_file=.rb-lite/reviewer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "P3: env strict nit\n"
+else
+  printf "No findings.\n"
+fi
+'
+  write_reviewers "$repo" fake-reviewer
+
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_MIN_FINDINGS_SEVERITY=P3 "$repo/bin/rb-lite" run \
+      --task "env strict p3" --max-rounds 2 --max-iters 2 \
+      --implement-cmd 'fake-implementer'
+  ) >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 2 round'
+  assert_equals 3 "$(cat "$repo/.rb-lite/implementer-count")" "env P3 implementer count"
+  assert_file_contains "$repo/remediated.txt" 'saw env P3 review'
+}
+
+test_cli_min_findings_severity_overrides_env() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/cli-floor-over-env"
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+'
+  write_fake "$repo" fake-reviewer 'printf "P3: env would loop, cli floor should not\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_MIN_FINDINGS_SEVERITY=P3 "$repo/bin/rb-lite" run \
+      --task "cli floor wins" --max-rounds 2 --max-iters 1 \
+      --implement-cmd 'fake-implementer' --min-findings-severity P2 --run-dir "$run_dir"
+  ) >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "cli severity floor precedence count"
+  assert_file_contains "$run_dir/log.txt" 'review panel clean \(floor P2\)'
+}
+
+test_min_findings_severity_p1_ignores_p2_review() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+'
+  write_fake "$repo" fake-reviewer 'printf -- "- [P2] below this floor\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "p1 floor" --max-rounds 2 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --min-findings-severity P1 >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "P1 floor implementer count"
+}
+
+test_min_findings_severity_p0_triggers_p0_review() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/implementer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if [[ $PROMPT == *"Review files"* ]]; then
+  printf "saw P0 review\n" >remediated.txt
+fi
+'
+  write_fake "$repo" fake-reviewer '
+mkdir -p .rb-lite
+count_file=.rb-lite/reviewer-count
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "1. [P0] critical issue\n"
+else
+  printf "No findings.\n"
+fi
+'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "p0 floor" --max-rounds 2 --max-iters 2 \
+    --implement-cmd 'fake-implementer' --min-findings-severity P0 >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 2 round'
+  assert_equals 3 "$(cat "$repo/.rb-lite/implementer-count")" "P0 floor implementer count"
+  assert_file_contains "$repo/remediated.txt" 'saw P0 review'
+}
+
+test_invalid_min_findings_severity_dies() {
+  local repo status
+  repo=$(new_repo)
+
+  status=0
+  run_rb_lite "$repo" run --task "invalid floor" --min-findings-severity P9 \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  [[ $status != 0 ]] || fail "invalid severity floor should fail rb-lite"
+  assert_file_contains /tmp/rb-lite-test.err 'min-findings-severity must be one of P0, P1, P2, P3'
 }
 
 test_clean_review_exits_successfully() {
@@ -732,6 +1046,16 @@ mkdir -p "$TMP_ROOT"
 
 test_implementer_stops_when_stable
 test_p1_review_triggers_remediation_round
+test_default_severity_floor_ignores_p3_only_review
+test_default_severity_floor_ignores_p3_body_that_mentions_p2
+test_default_severity_floor_triggers_on_p2_review
+test_severity_detection_accepts_common_reviewer_tag_formats
+test_min_findings_severity_p3_triggers_p3_review
+test_env_min_findings_severity_p3_triggers_p3_review
+test_cli_min_findings_severity_overrides_env
+test_min_findings_severity_p1_ignores_p2_review
+test_min_findings_severity_p0_triggers_p0_review
+test_invalid_min_findings_severity_dies
 test_clean_review_exits_successfully
 test_default_implementer_uses_noninteractive_codex_exec
 test_implementer_session_resume_resets_at_round_boundary

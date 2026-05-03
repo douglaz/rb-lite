@@ -2,8 +2,8 @@
 
 `rb-lite` is a small Bash CLI for the implement/review loop used in this repo:
 run an implementer until the git diff stabilizes, run a lightweight review
-panel, feed P0/P1/P2/P3 findings back into the implementer, and stop when the
-panel is clean or a cap is reached.
+panel, trigger another implementer round on P0/P1/P2 findings by default, and
+stop when the panel is clean or a cap is reached.
 
 ## Usage
 
@@ -47,6 +47,12 @@ implementer iteration; by default no timeout is applied. The timeout uses GNU
 coreutils `timeout`, sending SIGTERM at expiry and SIGKILL after a short grace
 period if the implementer is still running.
 
+By default, rb-lite only starts a remediation round when a successful reviewer
+emits a P0, P1, or P2 finding. P3-only review output is treated as clean; this
+is a deliberate behavior change to avoid late-stage nit ratchets. Use
+`--min-findings-severity P3` or `RB_LITE_MIN_FINDINGS_SEVERITY=P3` to preserve
+the old behavior. Valid levels are exactly `P0`, `P1`, `P2`, and `P3`.
+
 The default reviewer panel runs two reviewers concurrently:
 
 - `codex review --base "$BASE"`
@@ -67,6 +73,13 @@ disagreements between reviewers rather than seeing one merged blob.
 
 - A reviewer command must emit its review (any `P0`/`P1`/`P2`/`P3` findings,
   or `No findings.`) on **stdout**.
+- Finding severities should be tagged near the start of each finding line, for
+  example `P2:`, `[P2]`, `**P2**:`, or an issue heading like
+  `Issue 1 (P2):`. Incidental mentions later in a finding body are ignored.
+- Only findings at or above the configured severity floor trigger another
+  implementer round. The default floor is `P2`, so P3-only output is clean
+  unless `--min-findings-severity P3` or `RB_LITE_MIN_FINDINGS_SEVERITY=P3` is
+  set.
 - **Exit code semantics**: exit `0` = the tool succeeded and its stdout is the
   real review; exit non-zero = the tool itself failed and its output may be
   partial or garbage. Findings detection and the per-round implementer feed
@@ -98,6 +111,7 @@ disagreements between reviewers rather than seeing one merged blob.
 - `RB_LITE_IMPLEMENT_CMD`
 - `RB_LITE_SESSION_REGEX`
 - `RB_LITE_REVIEWERS_FILE`
+- `RB_LITE_MIN_FINDINGS_SEVERITY`
 - `RB_LITE_RUN_DIR`
 
 Run `bin/rb-lite --help` for the full option list.
