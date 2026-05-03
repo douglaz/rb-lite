@@ -23,6 +23,10 @@ Artifacts are written under `.rb-lite/runs/<id>/` by default:
   to the implementer on the next round
 - `log.txt`
 
+Progress lines written to `log.txt` are also mirrored to stderr by default, so
+long runs show round/iteration status in the terminal. Redirect stderr if you
+want to suppress them.
+
 The default implementer command is:
 
 ```bash

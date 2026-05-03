@@ -99,6 +99,23 @@ fi
   assert_file_contains "$repo/changed.txt" 'changed'
 }
 
+test_progress_log_mirrors_to_stderr() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/progress-stderr"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "progress stderr" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err
+
+  assert_file_contains /tmp/rb-lite-test.err 'round 1 implementer iteration 1 starting'
+  assert_file_contains /tmp/rb-lite-test.err 'round 1 implementer stabilized at iteration 1'
+  assert_file_contains "$run_dir/log.txt" 'round 1 implementer iteration 1 starting'
+}
+
 test_p1_review_triggers_remediation_round() {
   local repo
   repo=$(new_repo)
@@ -1045,6 +1062,7 @@ printf "%s\n" "$count" >"$count_file"
 mkdir -p "$TMP_ROOT"
 
 test_implementer_stops_when_stable
+test_progress_log_mirrors_to_stderr
 test_p1_review_triggers_remediation_round
 test_default_severity_floor_ignores_p3_only_review
 test_default_severity_floor_ignores_p3_body_that_mentions_p2
