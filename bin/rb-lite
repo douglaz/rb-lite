@@ -24,7 +24,7 @@ Options:
                           Timeout in seconds for each implementer iteration;
                           sends SIGTERM, then SIGKILL after a short grace period.
                           Requires GNU coreutils timeout. Default:
-                          RB_LITE_IMPLEMENT_TIMEOUT or none.
+                          RB_LITE_IMPLEMENT_TIMEOUT or 14400 (4 hours).
   --implement-cmd CMD     Implementer shell command. Default: RB_LITE_IMPLEMENT_CMD or
                           codex exec, resuming same-round sessions when available.
   --reviewers-file PATH   Reviewer command file. Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
@@ -407,7 +407,7 @@ run_command() {
   local base=${RB_LITE_BASE:-origin/master}
   local max_rounds=${RB_LITE_MAX_ROUNDS:-25}
   local max_iters=${RB_LITE_MAX_ITERS:-25}
-  local implement_timeout=${RB_LITE_IMPLEMENT_TIMEOUT:-}
+  local implement_timeout=${RB_LITE_IMPLEMENT_TIMEOUT:-14400}
   local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'}
   local reviewers_file=${RB_LITE_REVIEWERS_FILE:-.rb-lite-reviewers}
   local min_findings_severity=${RB_LITE_MIN_FINDINGS_SEVERITY:-P2}

@@ -43,7 +43,7 @@ the full match when no group is present. An empty capture leaves
 
 Override the implementer with `--implement-cmd` or `RB_LITE_IMPLEMENT_CMD`.
 Use `--implement-timeout SECS` or `RB_LITE_IMPLEMENT_TIMEOUT` to cap each
-implementer iteration; by default no timeout is applied. The timeout uses GNU
+implementer iteration; default is 14400 seconds (4 hours). The timeout uses GNU
 coreutils `timeout`, sending SIGTERM at expiry and SIGKILL after a short grace
 period if the implementer is still running.
 
