@@ -19,6 +19,8 @@ Options:
   --task-file PATH        Read task prompt from PATH.
   --base REF              Review base ref. Default: RB_LITE_BASE or origin/master.
   --max-rounds N          Maximum implement/review rounds. Default: RB_LITE_MAX_ROUNDS or 25.
+  --max-noop-rounds N     Stop after N consecutive no-op implementer rounds with
+                          reviewer findings. Default: RB_LITE_MAX_NOOP_ROUNDS or 2.
   --max-iters N           Maximum implementer iterations per round. Default: RB_LITE_MAX_ITERS or 25.
   --implement-timeout SECS
                           Timeout in seconds for each implementer iteration;
@@ -39,6 +41,7 @@ Options:
 Environment:
   RB_LITE_BASE            Default review base.
   RB_LITE_MAX_ROUNDS      Default maximum review rounds.
+  RB_LITE_MAX_NOOP_ROUNDS Default consecutive no-op rounds before stopping.
   RB_LITE_MAX_ITERS       Default maximum implementer iterations per round.
   RB_LITE_IMPLEMENT_TIMEOUT
                           Default implementer iteration timeout in seconds.
@@ -406,6 +409,7 @@ run_review_panel() {
 run_command() {
   local base=${RB_LITE_BASE:-origin/master}
   local max_rounds=${RB_LITE_MAX_ROUNDS:-25}
+  local max_noop_rounds=${RB_LITE_MAX_NOOP_ROUNDS:-2}
   local max_iters=${RB_LITE_MAX_ITERS:-25}
   local implement_timeout=${RB_LITE_IMPLEMENT_TIMEOUT:-14400}
   local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'}
@@ -424,7 +428,7 @@ run_command() {
   local task=
   local task_file=
   local branch=
-  local root round rc
+  local root round round_before round_after noop_round_streak
   local -a review_paths=()
 
   while (($#)); do
@@ -447,6 +451,11 @@ run_command() {
       --max-rounds)
         (($# >= 2)) || die "--max-rounds requires a value"
         max_rounds=$2
+        shift 2
+        ;;
+      --max-noop-rounds)
+        (($# >= 2)) || die "--max-noop-rounds requires a value"
+        max_noop_rounds=$2
         shift 2
         ;;
       --max-iters)
@@ -495,6 +504,7 @@ run_command() {
   done
 
   is_positive_int "$max_rounds" || die "--max-rounds must be a positive integer"
+  is_positive_int "$max_noop_rounds" || die "--max-noop-rounds must be a positive integer"
   is_positive_int "$max_iters" || die "--max-iters must be a positive integer"
   [[ -z $implement_timeout ]] || is_positive_int "$implement_timeout" \
     || die "--implement-timeout must be a positive integer number of seconds"
@@ -535,13 +545,21 @@ run_command() {
   : >"$LOG_FILE"
   log_msg "run directory: $RUN_DIR"
   log_msg "base: $base"
-  log_msg "max rounds: $max_rounds; max implementer iterations: $max_iters"
+  log_msg "max rounds: $max_rounds; max no-op rounds: $max_noop_rounds; max implementer iterations: $max_iters"
   [[ -z $implement_timeout ]] || log_msg "implementer iteration timeout: ${implement_timeout}s"
 
   round=1
+  noop_round_streak=0
   while (( round <= max_rounds )); do
+    round_before=$(fingerprint_git_state "$root")
     if ! run_implementer_loop "$root" "$round" "$max_iters" "$implement_timeout" "$implement_cmd" "$task" "${review_paths[@]}"; then
       die "implementer loop failed; see $RUN_DIR"
+    fi
+    round_after=$(fingerprint_git_state "$root")
+    if [[ $round_before == "$round_after" ]]; then
+      ((noop_round_streak += 1))
+    else
+      noop_round_streak=0
     fi
 
     if ! run_review_panel "$root" "$round" "$base" "$reviewers_file"; then
@@ -554,6 +572,11 @@ run_command() {
         exit 0
         ;;
       findings)
+        if (( noop_round_streak >= max_noop_rounds )); then
+          log_msg "round $round no-op implementer streak is $noop_round_streak (threshold $max_noop_rounds); stopping with reviewer findings"
+          printf 'rb-lite stopped after %s no-op implementer round(s); reviewers still report findings but implementer is not changing state. Artifacts: %s\n' "$noop_round_streak" "$RUN_DIR"
+          exit 0
+        fi
         review_paths=("${REVIEW_FILES_PATHS[@]}")
         ((round++))
         ;;

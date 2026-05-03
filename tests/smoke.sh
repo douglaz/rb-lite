@@ -156,6 +156,27 @@ fi
   assert_file_contains "$repo/env-review-files.txt" 'review-round-1-1\.md'
 }
 
+test_persistent_noop_implementer_stops_after_default_threshold() {
+  local repo run_dir
+  local -a implementer_logs reviewer_logs
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/noop-stop"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "P1: persistent finding\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "persistent noop" --max-rounds 5 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  implementer_logs=("$run_dir"/implementer-round-*-iter-1.stdout)
+  reviewer_logs=("$run_dir"/reviewer-round-*-1.stdout)
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite stopped after 2 no-op implementer round'
+  assert_file_contains /tmp/rb-lite-test.out 'reviewers still report findings'
+  assert_equals 2 "${#implementer_logs[@]}" "no-op stop implementer count"
+  assert_equals 2 "${#reviewer_logs[@]}" "no-op stop reviewer count"
+  assert_file_contains "$run_dir/log.txt" 'no-op implementer streak is 2'
+}
+
 test_default_severity_floor_ignores_p3_only_review() {
   local repo run_dir
   repo=$(new_repo)
@@ -1064,6 +1085,7 @@ mkdir -p "$TMP_ROOT"
 test_implementer_stops_when_stable
 test_progress_log_mirrors_to_stderr
 test_p1_review_triggers_remediation_round
+test_persistent_noop_implementer_stops_after_default_threshold
 test_default_severity_floor_ignores_p3_only_review
 test_default_severity_floor_ignores_p3_body_that_mentions_p2
 test_default_severity_floor_triggers_on_p2_review

@@ -57,6 +57,11 @@ is a deliberate behavior change to avoid late-stage nit ratchets. Use
 `--min-findings-severity P3` or `RB_LITE_MIN_FINDINGS_SEVERITY=P3` to preserve
 the old behavior. Valid levels are exactly `P0`, `P1`, `P2`, and `P3`.
 
+To avoid spending repeated cycles on reviewer findings the implementer declines
+to change, rb-lite stops successfully after two consecutive no-op implementer
+rounds that still produce actionable reviewer findings. Configure this with
+`--max-noop-rounds N` or `RB_LITE_MAX_NOOP_ROUNDS`.
+
 The default reviewer panel runs two reviewers concurrently:
 
 - `codex review --base "$BASE"`
@@ -110,6 +115,7 @@ disagreements between reviewers rather than seeing one merged blob.
 
 - `RB_LITE_BASE`
 - `RB_LITE_MAX_ROUNDS`
+- `RB_LITE_MAX_NOOP_ROUNDS`
 - `RB_LITE_MAX_ITERS`
 - `RB_LITE_IMPLEMENT_TIMEOUT`
 - `RB_LITE_IMPLEMENT_CMD`
