@@ -1,5 +1,7 @@
 # rb-lite
 
+[![CI](https://github.com/douglaz/rb-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/douglaz/rb-lite/actions/workflows/ci.yml)
+
 A small Bash CLI that drives an **implement → review** loop using
 [`codex`](https://github.com/openai/codex) and
 [`claude`](https://docs.anthropic.com/claude/docs/claude-code) as the
