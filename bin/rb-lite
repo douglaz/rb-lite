@@ -18,7 +18,7 @@ unexpected_error() {
 }
 trap unexpected_error ERR
 
-DEFAULT_PROMPT=$'Read AGENTS.md if present. If a review file is provided, address the findings\nin that review. Otherwise implement the requested work. Stop when no code or\ntest changes are needed.'
+DEFAULT_PROMPT=$'Read AGENTS.md if present. If review files are provided, address the findings\nin those reviews. Otherwise implement the requested work. Stop when no code or\ntest changes are needed.'
 
 usage() {
   cat <<'EOF'
