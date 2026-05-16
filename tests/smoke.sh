@@ -1106,11 +1106,27 @@ for arg in "$@"; do
   printf "%s\n" "$arg" >".rb-lite/npx-arg-$i"
   i=$((i + 1))
 done
-if [[ $# -ne 4 || ${1:-} != -y || ${2:-} != @google/gemini-cli || ${3:-} != -p ]]; then
+policy=${4:-}
+if [[ $# -ne 8 || ${1:-} != -y || ${2:-} != @google/gemini-cli || ${3:-} != --policy || $policy != */gemini-policy.toml || ${5:-} != --approval-mode || ${6:-} != yolo || ${7:-} != -p ]]; then
   printf "unexpected npx args: %s\n" "$*" >&2
   exit 98
 fi
-printf "%s\n" "$4" >.rb-lite/gemini-prompt
+if [[ ! -f $policy ]]; then
+  printf "missing Gemini policy file: %s\n" "$policy" >&2
+  exit 97
+fi
+if ! grep -Eq "toolName[[:space:]]*=[[:space:]]*\"\\*\"" "$policy" \
+  || ! grep -Eq "decision[[:space:]]*=[[:space:]]*\"allow\"" "$policy"; then
+  printf "Gemini policy file did not grant all-tool access\n" >&2
+  exit 96
+fi
+for arg in "$@"; do
+  if [[ $arg == --skip-trust ]]; then
+    printf "default Gemini reviewer must not use --skip-trust\n" >&2
+    exit 95
+  fi
+done
+printf "%s\n" "$8" >.rb-lite/gemini-prompt
 printf "gemini says clean\n"
 '
 
@@ -1127,10 +1143,14 @@ printf "gemini says clean\n"
     fail "default claude reviewer must not use --dangerously-skip-permissions"
   fi
   assert_file_contains "$repo/.rb-lite/claude-args" 'base ref '
-  assert_equals 4 "$(cat "$repo/.rb-lite/npx-argc")" "default npx arg count"
+  assert_equals 8 "$(cat "$repo/.rb-lite/npx-argc")" "default npx arg count"
   assert_equals -y "$(cat "$repo/.rb-lite/npx-arg-1")" "default npx yes flag"
   assert_equals @google/gemini-cli "$(cat "$repo/.rb-lite/npx-arg-2")" "default npx package"
-  assert_equals -p "$(cat "$repo/.rb-lite/npx-arg-3")" "default npx prompt flag"
+  assert_equals --policy "$(cat "$repo/.rb-lite/npx-arg-3")" "default npx policy flag"
+  assert_file_contains "$repo/.rb-lite/npx-arg-4" '/gemini-policy\.toml$'
+  assert_equals --approval-mode "$(cat "$repo/.rb-lite/npx-arg-5")" "default npx approval flag"
+  assert_equals yolo "$(cat "$repo/.rb-lite/npx-arg-6")" "default npx approval mode"
+  assert_equals -p "$(cat "$repo/.rb-lite/npx-arg-7")" "default npx prompt flag"
   assert_file_contains "$repo/.rb-lite/gemini-prompt" 'Read AGENTS\.md'
   assert_file_contains "$repo/.rb-lite/gemini-prompt" 'base ref '
   assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.rb-lite/'
@@ -1138,6 +1158,21 @@ printf "gemini says clean\n"
   assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.git/ralph-burning-live/'
   assert_file_contains "$repo/.rb-lite/gemini-prompt" 'No findings\.'
   assert_file_contains "$repo/.rb-lite/gemini-prompt" 'Do not modify any files'
+}
+
+test_gemini_policy_file_written_to_run_dir() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/policy-file"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_reviewers "$repo" 'printf "policy file: %s\n" "$RUN_DIR/gemini-policy.toml"; if [[ -f "$RUN_DIR/gemini-policy.toml" ]]; then printf "exists\n"; cat "$RUN_DIR/gemini-policy.toml"; fi; printf "No findings.\n"'
+
+  run_rb_lite "$repo" run --task "policy file" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains "$run_dir/review-round-1-1.md" 'exists'
+  assert_file_contains "$run_dir/review-round-1-1.md" 'toolName[[:space:]]*=[[:space:]]*"\*"'
+  assert_file_contains "$run_dir/review-round-1-1.md" 'decision[[:space:]]*=[[:space:]]*"allow"'
 }
 
 test_default_gemini_reviewer_refuses_repo_local_package() {
@@ -1391,6 +1426,7 @@ test_rb_lite_artifacts_do_not_affect_stability
 test_custom_run_dir_does_not_affect_stability
 test_reviewer_config_writes_per_reviewer_files
 test_default_reviewer_panel_runs_codex_claude_and_gemini
+test_gemini_policy_file_written_to_run_dir
 test_default_gemini_reviewer_refuses_repo_local_package
 test_reviewer_exit_two_is_operational_failure
 test_reviewer_stderr_excluded_from_combined_when_clean

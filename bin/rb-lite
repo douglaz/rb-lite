@@ -92,7 +92,8 @@ Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
 three-reviewer panel:
   codex review --base "$BASE"
   claude -p "<P0..P3 review prompt>" --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"
-  npx -y @google/gemini-cli -p "<P0..P3 review prompt>"
+  npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "<P0..P3 review prompt>"
+rb-lite writes "$RUN_DIR/gemini-policy.toml" per run; it grants all-tool access.
 codex and claude must be on PATH. The Gemini reviewer also needs npx on PATH
 plus GEMINI_API_KEY or an OAuth login previously stored by gemini-cli. Without
 Gemini credentials, the third reviewer just fails and the panel falls back to
@@ -397,7 +398,7 @@ load_reviewers() {
     REVIEWERS=(
       'codex review --base "$BASE"'
       'claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). If there are no actionable findings, output exactly: No findings. Do not modify any files." --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"'
-      'if [[ -e node_modules/@google/gemini-cli || -L node_modules/@google/gemini-cli || -e node_modules/.bin/gemini || -L node_modules/.bin/gemini ]]; then printf "%s\n" "rb-lite: refusing to run default Gemini reviewer because this repository has a local Gemini CLI package/bin that npx could prefer; customize .rb-lite-reviewers if this is intentional" >&2; exit 1; fi; npx -y @google/gemini-cli -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). If there are no actionable findings, output exactly: No findings. Do not modify any files."'
+      'if [[ -e node_modules/@google/gemini-cli || -L node_modules/@google/gemini-cli || -e node_modules/.bin/gemini || -L node_modules/.bin/gemini ]]; then printf "%s\n" "rb-lite: refusing to run default Gemini reviewer because this repository has a local Gemini CLI package/bin that npx could prefer; customize .rb-lite-reviewers if this is intentional" >&2; exit 1; fi; npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). If there are no actionable findings, output exactly: No findings. Do not modify any files."'
     )
   fi
 }
@@ -697,6 +698,13 @@ run_command() {
   SUMMARY_STARTED_AT=$(date -u +%s)
   LOG_FILE="$RUN_DIR/log.txt"
   : >"$LOG_FILE" || die_with "$EXIT_ENV" "failed to initialize run log: $LOG_FILE"
+  cat >"$RUN_DIR/gemini-policy.toml" <<'EOF' \
+    || die_with "$EXIT_ENV" "failed to initialize Gemini policy: $RUN_DIR/gemini-policy.toml"
+[[rule]]
+toolName = "*"
+decision = "allow"
+priority = 1
+EOF
   log_msg "run directory: $RUN_DIR"
   log_msg "base: $base"
   log_msg "max rounds: $max_rounds; max no-op rounds: $max_noop_rounds; max implementer iterations: $max_iters"

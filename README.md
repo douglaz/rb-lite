@@ -66,8 +66,16 @@ and (B) wrap those dependencies via Nix automatically.
   broad allowed-tools list (matches the sister `ralph-burning` project).
 - `npx` on `PATH` plus Gemini credentials for the third default reviewer:
   either `GEMINI_API_KEY` in the environment or an existing OAuth login stored
-  by `gemini-cli`. Without Gemini credentials, the panel silently degrades to
-  codex+claude.
+  by `gemini-cli`. rb-lite grants the reviewer full tool access (shell exec,
+  file ops) via a per-run policy file at `$RUN_DIR/gemini-policy.toml`; the
+  reviewer prompt still says "Do not modify any files." — that prompt is the
+  only restraint on writes, same trust model as `codex review`. The working
+  directory must also be trusted by gemini-cli (one-time interactive `gemini`
+  trust prompt, or `GEMINI_CLI_TRUST_WORKSPACE=true` in the environment), or
+  the reviewer fails and the panel falls back to codex+claude. rb-lite
+  intentionally does NOT pass `--skip-trust`, so a malicious in-repo
+  `.gemini/settings.json` from an untrusted PR cannot inject hooks or MCP
+  servers into the review.
 
 You can override or replace either side — see "Configuration" below.
 
@@ -88,7 +96,7 @@ You can override or replace either side — see "Configuration" below.
                  │ Review panel (concurrent)                         │
                  │  • codex review --base X                          │
                  │  • claude -p "<prompt>"                           │
-                 │  • npx -y @google/gemini-cli -p "<prompt>"        │
+                 │  • npx -y @google/gemini-cli --policy … -p "…"    │
                  │  • each writes review-round-N-K.md                │
                  └───────────────────────────┬───────────────────────┘
                                              │
@@ -154,7 +162,7 @@ The default panel is fine for most cases. To override, drop a
 # .rb-lite-reviewers
 codex review --base "$BASE"
 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
-npx -y @google/gemini-cli -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean."
+npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean."
 my-custom-linter --json | wrap-as-p-tags
 ```
 
