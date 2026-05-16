@@ -14,6 +14,12 @@ fail() {
   exit 1
 }
 
+require_gnu_timeout() {
+  command -v timeout >/dev/null \
+    && timeout --version 2>/dev/null | grep -q 'GNU coreutils' \
+    || fail "GNU coreutils timeout is required for smoke tests (run via 'nix develop -c')"
+}
+
 assert_file_contains() {
   local file=$1
   local pattern=$2
@@ -812,6 +818,59 @@ test_env_implement_timeout_fails_stuck_iteration() {
   assert_file_contains "$run_dir/log.txt" 'failed with exit 124'
 }
 
+test_reviewer_timeout_fails_stuck_reviewer() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/reviewer-timeout-run"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fast-reviewer 'printf "Clean review\n"'
+  write_fake "$repo" stuck-reviewer '
+printf "stuck reviewer starting\n" >&2
+sleep 5
+'
+  write_reviewers "$repo" fast-reviewer stuck-reviewer
+
+  run_rb_lite "$repo" run --task "reviewer timeout" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --reviewer-timeout 1 --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_file_contains "$run_dir/review-round-1-1.md" 'Clean review'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'exit 124'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'stderr tail'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'stuck reviewer starting'
+  assert_file_contains "$run_dir/log.txt" 'reviewer 2 failed with exit 124 .*timed out after 1s'
+  assert_file_contains /tmp/rb-lite-test.out '"reviewer_timeout_secs": 1'
+}
+
+test_env_reviewer_timeout_fails_stuck_reviewer() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/env-reviewer-timeout-run"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fast-reviewer 'printf "Clean review\n"'
+  write_fake "$repo" stuck-reviewer '
+printf "env stuck reviewer starting\n" >&2
+sleep 5
+'
+  write_reviewers "$repo" fast-reviewer stuck-reviewer
+
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_REVIEWER_TIMEOUT=1 "$repo/bin/rb-lite" run \
+      --task "env reviewer timeout" --max-rounds 1 --max-iters 1 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir"
+  ) >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_file_contains "$run_dir/review-round-1-1.md" 'Clean review'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'exit 124'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'stderr tail'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'env stuck reviewer starting'
+  assert_file_contains "$run_dir/log.txt" 'reviewer 2 failed with exit 124 .*timed out after 1s'
+  assert_file_contains /tmp/rb-lite-test.out '"reviewer_timeout_secs": 1'
+}
+
 test_signal_summary_preserves_signal_exit_code() {
   local repo run_dir status
   repo=$(new_repo)
@@ -842,6 +901,23 @@ test_cli_implement_timeout_overrides_invalid_env() {
     PATH="$repo/fakes:$PATH" RB_LITE_IMPLEMENT_TIMEOUT=invalid "$repo/bin/rb-lite" run \
       --task "timeout precedence" --max-rounds 1 --max-iters 1 \
       --implement-cmd 'fake-implementer' --implement-timeout 1
+  ) >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+}
+
+test_cli_reviewer_timeout_overrides_invalid_env() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings.\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_REVIEWER_TIMEOUT=invalid "$repo/bin/rb-lite" run \
+      --task "reviewer timeout precedence" --max-rounds 1 --max-iters 1 \
+      --implement-cmd 'fake-implementer' --reviewer-timeout 1
   ) >/tmp/rb-lite-test.out
 
   assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
@@ -1269,10 +1345,12 @@ printf "%s\n" "$count" >"$count_file"
   assert_file_contains "$run_dir/review-round-1-1.md" 'exit 3 — output may be partial'
   assert_file_contains "$run_dir/review-round-1-1.md" 'stderr tail'
   assert_file_contains "$run_dir/review-round-1-1.md" 'boom'
+  assert_file_contains "$run_dir/log.txt" 'reviewer 1 failed with exit 3'
   assert_file_contains "$run_dir/log.txt" 'partial failures: 1 of 2 reviewers succeeded'
 }
 
 mkdir -p "$TMP_ROOT"
+require_gnu_timeout
 
 test_implementer_stops_when_stable
 test_progress_log_mirrors_to_stderr
@@ -1300,8 +1378,11 @@ test_implementer_session_resume_picks_first_match
 test_env_implement_cmd_override_still_wins
 test_implement_timeout_fails_stuck_iteration
 test_env_implement_timeout_fails_stuck_iteration
+test_reviewer_timeout_fails_stuck_reviewer
+test_env_reviewer_timeout_fails_stuck_reviewer
 test_signal_summary_preserves_signal_exit_code
 test_cli_implement_timeout_overrides_invalid_env
+test_cli_reviewer_timeout_overrides_invalid_env
 test_implement_timeout_requires_gnu_timeout
 test_untracked_files_affect_stability
 test_quoted_untracked_paths_affect_stability

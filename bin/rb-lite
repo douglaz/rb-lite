@@ -41,6 +41,12 @@ Options:
                           sends SIGTERM, then SIGKILL after a short grace period.
                           Requires GNU coreutils timeout. Default:
                           RB_LITE_IMPLEMENT_TIMEOUT or 14400 (4 hours).
+  --reviewer-timeout SECS
+                          Timeout in seconds for each reviewer command;
+                          sends SIGTERM, then SIGKILL after a short grace period.
+                          Empty string disables the timeout. Requires GNU
+                          coreutils timeout. Default:
+                          RB_LITE_REVIEWER_TIMEOUT or 1800 (30 minutes).
   --implement-cmd CMD     Implementer shell command. Default: RB_LITE_IMPLEMENT_CMD or
                           codex exec, resuming same-round sessions when available.
   --reviewers-file PATH   Reviewer command file. Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
@@ -59,6 +65,9 @@ Environment:
   RB_LITE_MAX_ITERS       Default maximum implementer iterations per round.
   RB_LITE_IMPLEMENT_TIMEOUT
                           Default implementer iteration timeout in seconds.
+  RB_LITE_REVIEWER_TIMEOUT
+                          Default reviewer command timeout in seconds; empty
+                          disables reviewer timeouts.
   RB_LITE_IMPLEMENT_CMD   Shell command run for each implementer iteration.
   RB_LITE_PREV_SESSION    Exported to the implementer with the prior same-round session ID.
   RB_LITE_SESSION_REGEX   Bash ERE for session IDs in implementer stderr; empty disables capture.
@@ -151,7 +160,7 @@ json_escape() {
 }
 
 emit_exit_summary() {
-  local rc=$1 now duration run_dir_json timeout_json status min_severity_json
+  local rc=$1 now duration run_dir_json implement_timeout_json reviewer_timeout_json status min_severity_json
   trap - ERR
   set +e
   [[ ${SUMMARY_ENABLED:-0} == 1 ]] || return 0
@@ -179,14 +188,16 @@ emit_exit_summary() {
 
   run_dir_json=null
   [[ -z ${RUN_DIR:-} ]] || run_dir_json=\"$(json_escape "$RUN_DIR")\"
-  timeout_json=null
-  [[ -z ${SUMMARY_IMPLEMENT_TIMEOUT_SECS:-} ]] || timeout_json=$SUMMARY_IMPLEMENT_TIMEOUT_SECS
+  implement_timeout_json=null
+  [[ -z ${SUMMARY_IMPLEMENT_TIMEOUT_SECS:-} ]] || implement_timeout_json=$SUMMARY_IMPLEMENT_TIMEOUT_SECS
+  reviewer_timeout_json=null
+  [[ -z ${SUMMARY_REVIEWER_TIMEOUT_SECS:-} ]] || reviewer_timeout_json=$SUMMARY_REVIEWER_TIMEOUT_SECS
 
   min_severity_json=$(json_escape "${SUMMARY_MIN_FINDINGS_SEVERITY:-P2}")
-  printf '{"run_dir": %s, "exit_code": %s, "status": "%s", "rounds": %s, "implementer_iterations": %s, "noop_rounds_streak": %s, "duration_secs": %s, "config": {"max_rounds": %s, "max_iters": %s, "max_noop_rounds": %s, "min_findings_severity": "%s", "implement_timeout_secs": %s}}\n' \
+  printf '{"run_dir": %s, "exit_code": %s, "status": "%s", "rounds": %s, "implementer_iterations": %s, "noop_rounds_streak": %s, "duration_secs": %s, "config": {"max_rounds": %s, "max_iters": %s, "max_noop_rounds": %s, "min_findings_severity": "%s", "implement_timeout_secs": %s, "reviewer_timeout_secs": %s}}\n' \
     "$run_dir_json" "$rc" "$status" "${SUMMARY_ROUNDS:-0}" "${SUMMARY_IMPLEMENTER_ITERATIONS:-0}" \
     "${SUMMARY_NOOP_ROUNDS_STREAK:-0}" "$duration" "${SUMMARY_MAX_ROUNDS:-25}" \
-    "${SUMMARY_MAX_ITERS:-25}" "${SUMMARY_MAX_NOOP_ROUNDS:-2}" "$min_severity_json" "$timeout_json"
+    "${SUMMARY_MAX_ITERS:-25}" "${SUMMARY_MAX_NOOP_ROUNDS:-2}" "$min_severity_json" "$implement_timeout_json" "$reviewer_timeout_json"
 }
 
 handle_signal() {
@@ -451,8 +462,9 @@ run_review_panel() {
   local round=$2
   local base=$3
   local reviewers_file=$4
+  local reviewer_timeout=$5
   local count idx command stdout stderr pid failed succeeded rc
-  local -a pids
+  local -a pids reviewer_argv
 
   REVIEW_PANEL_RESULT=failed
   REVIEW_PANEL_FAILURE_EXIT=0
@@ -466,9 +478,14 @@ run_review_panel() {
     command=${REVIEWERS[$((idx - 1))]}
     stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
     stderr="$RUN_DIR/reviewer-round-${round}-${idx}.stderr"
+    if [[ -n $reviewer_timeout ]]; then
+      reviewer_argv=(timeout --kill-after="$IMPLEMENT_TIMEOUT_KILL_AFTER" "$reviewer_timeout" bash -c "$command")
+    else
+      reviewer_argv=(bash -c "$command")
+    fi
     (
       cd "$root"
-      BASE=$base RUN_DIR=$RUN_DIR ROUND=$round REVIEWER_INDEX=$idx bash -c "$command" </dev/null
+      BASE=$base RUN_DIR=$RUN_DIR ROUND=$round REVIEWER_INDEX=$idx "${reviewer_argv[@]}" </dev/null
     ) >"$stdout" 2>"$stderr" &
     pids+=("$!")
   done
@@ -476,13 +493,19 @@ run_review_panel() {
   ACTIVE_CHILD_PIDS=("${pids[@]}")
   failed=0
   succeeded=0
-  for pid in "${pids[@]}"; do
+  for ((idx = 1; idx <= count; idx++)); do
+    pid=${pids[$((idx - 1))]}
     if wait "$pid"; then
       rc=0
       ((succeeded++))
     else
       rc=$?
       failed=$rc
+      if [[ -n $reviewer_timeout && $rc == 124 ]]; then
+        log_msg "round $round reviewer $idx failed with exit $rc (timed out after ${reviewer_timeout}s)"
+      else
+        log_msg "round $round reviewer $idx failed with exit $rc"
+      fi
     fi
     REVIEWER_RCS+=("$rc")
   done
@@ -518,6 +541,7 @@ run_command() {
   local max_noop_rounds=${RB_LITE_MAX_NOOP_ROUNDS:-2}
   local max_iters=${RB_LITE_MAX_ITERS:-25}
   local implement_timeout=${RB_LITE_IMPLEMENT_TIMEOUT:-14400}
+  local reviewer_timeout=${RB_LITE_REVIEWER_TIMEOUT-1800}
   local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'}
   local reviewers_file=${RB_LITE_REVIEWERS_FILE:-.rb-lite-reviewers}
   local min_findings_severity=${RB_LITE_MIN_FINDINGS_SEVERITY:-P2}
@@ -574,6 +598,11 @@ run_command() {
         implement_timeout=$2
         shift 2
         ;;
+      --reviewer-timeout)
+        (($# >= 2)) || die "--reviewer-timeout requires a value"
+        reviewer_timeout=$2
+        shift 2
+        ;;
       --implement-cmd)
         (($# >= 2)) || die "--implement-cmd requires a value"
         implement_cmd=$2
@@ -615,6 +644,8 @@ run_command() {
   is_positive_int "$max_iters" || die "--max-iters must be a positive integer"
   [[ -z $implement_timeout ]] || is_positive_int "$implement_timeout" \
     || die "--implement-timeout must be a positive integer number of seconds"
+  [[ -z $reviewer_timeout ]] || is_positive_int "$reviewer_timeout" \
+    || die "--reviewer-timeout must be a positive integer number of seconds"
   case $min_findings_severity in
     P0) findings_severity_digits=0; actionable_findings_severities=P0 ;;
     P1) findings_severity_digits=0-1; actionable_findings_severities=P0/P1 ;;
@@ -627,6 +658,7 @@ run_command() {
   SUMMARY_MAX_NOOP_ROUNDS=$max_noop_rounds
   SUMMARY_MIN_FINDINGS_SEVERITY=$min_findings_severity
   SUMMARY_IMPLEMENT_TIMEOUT_SECS=$implement_timeout
+  SUMMARY_REVIEWER_TIMEOUT_SECS=$reviewer_timeout
   # Line tags cover the canonical reviewer examples in tests; the fallback
   # handles common "Issue 1 (P2): ..." style parenthesized severities.
   findings_line_tag="${findings_tag_prefix}(${findings_tag_marker}\\[P[${findings_severity_digits}]\\]${findings_tag_marker}${findings_tag_boundary}?|${findings_tag_marker}P[${findings_severity_digits}]${findings_tag_sep}${findings_tag_marker}${findings_tag_boundary}?|${findings_tag_marker}P[${findings_severity_digits}]${findings_tag_marker}${findings_tag_boundary})"
@@ -635,10 +667,18 @@ run_command() {
   MIN_FINDINGS_SEVERITY=$min_findings_severity
   FINDINGS_SEVERITY_PATTERN=$findings_severity_pattern
   ACTIONABLE_FINDINGS_SEVERITIES=$actionable_findings_severities
-  if [[ -n $implement_timeout ]]; then
-    command -v timeout >/dev/null || die_with "$EXIT_ENV" "--implement-timeout requires GNU coreutils timeout"
+  if [[ -n $implement_timeout || -n $reviewer_timeout ]]; then
+    local timeout_message
+    if [[ -n $implement_timeout && -n $reviewer_timeout ]]; then
+      timeout_message="--implement-timeout and --reviewer-timeout require GNU coreutils timeout"
+    elif [[ -n $implement_timeout ]]; then
+      timeout_message="--implement-timeout requires GNU coreutils timeout"
+    else
+      timeout_message="--reviewer-timeout requires GNU coreutils timeout"
+    fi
+    command -v timeout >/dev/null || die_with "$EXIT_ENV" "$timeout_message"
     timeout --version 2>/dev/null | grep -q 'GNU coreutils' \
-      || die_with "$EXIT_ENV" "--implement-timeout requires GNU coreutils timeout"
+      || die_with "$EXIT_ENV" "$timeout_message"
   fi
   [[ -n $task && -n $task_file ]] && die "use either --task or --task-file, not both"
   if [[ -n $task_file ]]; then
@@ -661,6 +701,7 @@ run_command() {
   log_msg "base: $base"
   log_msg "max rounds: $max_rounds; max no-op rounds: $max_noop_rounds; max implementer iterations: $max_iters"
   [[ -z $implement_timeout ]] || log_msg "implementer iteration timeout: ${implement_timeout}s"
+  [[ -z $reviewer_timeout ]] || log_msg "reviewer timeout: ${reviewer_timeout}s"
 
   round=1
   noop_round_streak=0
@@ -677,7 +718,7 @@ run_command() {
     fi
     SUMMARY_NOOP_ROUNDS_STREAK=$noop_round_streak
 
-    if ! run_review_panel "$root" "$round" "$base" "$reviewers_file"; then
+    if ! run_review_panel "$root" "$round" "$base" "$reviewers_file" "$reviewer_timeout"; then
       die_with "$EXIT_REVIEW_PANEL" "review panel failed with exit $REVIEW_PANEL_FAILURE_EXIT; see $RUN_DIR"
     fi
 
@@ -745,6 +786,7 @@ SUMMARY_MAX_ITERS=25
 SUMMARY_MAX_NOOP_ROUNDS=2
 SUMMARY_MIN_FINDINGS_SEVERITY=P2
 SUMMARY_IMPLEMENT_TIMEOUT_SECS=14400
+SUMMARY_REVIEWER_TIMEOUT_SECS=1800
 declare -a ACTIVE_CHILD_PIDS
 declare -a REVIEWERS
 declare -a REVIEWER_RCS

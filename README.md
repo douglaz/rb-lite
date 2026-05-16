@@ -121,6 +121,7 @@ Common flags (full list: `rb-lite --help`):
 | `--max-noop-rounds N` | 2 | Consecutive no-op implementer rounds before consensus-failure exit |
 | `--min-findings-severity LEVEL` | `P2` | Lowest severity that triggers another round (`P0`/`P1`/`P2`/`P3`) |
 | `--implement-timeout SECS` | 14400 | SIGTERM/SIGKILL each implementer iteration if it runs longer |
+| `--reviewer-timeout SECS` | 1800 | SIGTERM/SIGKILL each reviewer if it runs longer; empty disables |
 | `--implement-cmd CMD` | codex shell | Override the implementer subprocess |
 | `--reviewers-file PATH` | `.rb-lite-reviewers` | Custom reviewer panel (one shell command per line) |
 | `--branch NAME` | none | `git switch -c NAME` before starting |
@@ -158,7 +159,10 @@ my-custom-linter --json | wrap-as-p-tags
 ```
 
 Reviewers run **concurrently**, each gets `BASE`, `RUN_DIR`, `ROUND`,
-`REVIEWER_INDEX` in env, and stdin closed.
+`REVIEWER_INDEX` in env, and stdin closed. By default, each reviewer is
+wrapped in `timeout` (default 30m); a timed-out reviewer counts as a failed
+reviewer and is recorded in its per-reviewer markdown file, but does not abort
+the panel as long as at least one reviewer succeeds.
 
 ### Reviewer contract
 
@@ -214,7 +218,7 @@ Every exit (success or failure) prints one JSON object on a single line to
 stdout, as the **last** line of output. Pipe to `jq` to consume:
 
 ```json
-{"run_dir": "/path/.rb-lite/runs/...", "exit_code": 0, "status": "clean", "rounds": 3, "implementer_iterations": 5, "noop_rounds_streak": 0, "duration_secs": 712, "config": {"max_rounds": 25, "max_iters": 25, "max_noop_rounds": 2, "min_findings_severity": "P2", "implement_timeout_secs": 14400}}
+{"run_dir": "/path/.rb-lite/runs/...", "exit_code": 0, "status": "clean", "rounds": 3, "implementer_iterations": 5, "noop_rounds_streak": 0, "duration_secs": 712, "config": {"max_rounds": 25, "max_iters": 25, "max_noop_rounds": 2, "min_findings_severity": "P2", "implement_timeout_secs": 14400, "reviewer_timeout_secs": 1800}}
 ```
 
 The human-readable `rb-lite clean after N round(s)` line is printed before
@@ -227,6 +231,7 @@ the JSON on success; failure messages still go to stderr.
 - `RB_LITE_MAX_NOOP_ROUNDS`
 - `RB_LITE_MAX_ITERS`
 - `RB_LITE_IMPLEMENT_TIMEOUT`
+- `RB_LITE_REVIEWER_TIMEOUT` (empty disables reviewer timeouts)
 - `RB_LITE_IMPLEMENT_CMD`
 - `RB_LITE_SESSION_REGEX`
 - `RB_LITE_REVIEWERS_FILE`
