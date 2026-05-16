@@ -39,13 +39,15 @@ Options:
   --implement-timeout SECS
                           Timeout in seconds for each implementer iteration;
                           sends SIGTERM, then SIGKILL after a short grace period.
-                          Requires GNU coreutils timeout. Default:
+                          Requires a timeout binary on PATH that supports
+                          --kill-after (GNU coreutils or uutils). Default:
                           RB_LITE_IMPLEMENT_TIMEOUT or 14400 (4 hours).
   --reviewer-timeout SECS
                           Timeout in seconds for each reviewer command;
                           sends SIGTERM, then SIGKILL after a short grace period.
-                          Empty string disables the timeout. Requires GNU
-                          coreutils timeout. Default:
+                          Empty string disables the timeout. Requires a timeout
+                          binary on PATH that supports --kill-after (GNU
+                          coreutils or uutils). Default:
                           RB_LITE_REVIEWER_TIMEOUT or 1800 (30 minutes).
   --implement-cmd CMD     Implementer shell command. Default: RB_LITE_IMPLEMENT_CMD or
                           codex exec, resuming same-round sessions when available.
@@ -122,7 +124,7 @@ as the final stdout line. See README.md for the schema.
 Exit codes:
   0   Clean review panel.
   2   Usage error, including invalid flags or missing task files.
-  3   Environment/preflight error, including git repo, branch creation, GNU timeout, or run-dir/log setup.
+  3   Environment/preflight error, including git repo, branch creation, timeout support, or run-dir/log setup.
   10  Implementer loop failed; subprocess failures, timeouts, and max-iters are normalized to 10.
   11  Review panel failed because zero reviewers exited 0.
   12  Max rounds hit before clean review.
@@ -314,7 +316,7 @@ run_implementer_loop() {
   fi
 
   if [[ -n $implement_timeout ]]; then
-    # GNU timeout's default mode signals the command process group, covering
+    # timeout's default mode signals the command process group, covering
     # children spawned by the implementer shell.
     implementer_argv=(timeout --kill-after="$IMPLEMENT_TIMEOUT_KILL_AFTER" "$implement_timeout" bash -c "$command")
   else
@@ -671,15 +673,14 @@ run_command() {
   if [[ -n $implement_timeout || -n $reviewer_timeout ]]; then
     local timeout_message
     if [[ -n $implement_timeout && -n $reviewer_timeout ]]; then
-      timeout_message="--implement-timeout and --reviewer-timeout require GNU coreutils timeout"
+      timeout_message="--implement-timeout and --reviewer-timeout require a 'timeout' binary on PATH that supports --kill-after"
     elif [[ -n $implement_timeout ]]; then
-      timeout_message="--implement-timeout requires GNU coreutils timeout"
+      timeout_message="--implement-timeout requires a 'timeout' binary on PATH that supports --kill-after"
     else
-      timeout_message="--reviewer-timeout requires GNU coreutils timeout"
+      timeout_message="--reviewer-timeout requires a 'timeout' binary on PATH that supports --kill-after"
     fi
     command -v timeout >/dev/null || die_with "$EXIT_ENV" "$timeout_message"
-    timeout --version 2>/dev/null | grep -q 'GNU coreutils' \
-      || die_with "$EXIT_ENV" "$timeout_message"
+    timeout --kill-after=1s 1s true 2>/dev/null || die_with "$EXIT_ENV" "$timeout_message"
   fi
   [[ -n $task && -n $task_file ]] && die "use either --task or --task-file, not both"
   if [[ -n $task_file ]]; then
