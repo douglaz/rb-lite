@@ -14,10 +14,10 @@ fail() {
   exit 1
 }
 
-require_gnu_timeout() {
+require_timeout_with_kill_after() {
   command -v timeout >/dev/null \
-    && timeout --version 2>/dev/null | grep -q 'GNU coreutils' \
-    || fail "GNU coreutils timeout is required for smoke tests (run via 'nix develop -c')"
+    && timeout --kill-after=1s 1s true 2>/dev/null \
+    || fail "timeout with --kill-after support is required for smoke tests (run via 'nix develop -c')"
 }
 
 assert_file_contains() {
@@ -923,18 +923,60 @@ test_cli_reviewer_timeout_overrides_invalid_env() {
   assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
 }
 
-test_implement_timeout_requires_gnu_timeout() {
+test_implement_timeout_requires_kill_after_support() {
   local repo status
   repo=$(new_repo)
-  write_fake "$repo" timeout 'printf "not GNU timeout\n"'
+  write_fake "$repo" timeout '
+if [[ ${1:-} == --kill-after* ]]; then
+  printf "unsupported --kill-after\n" >&2
+  exit 125
+fi
+if [[ ${1:-} == --version ]]; then
+  printf "timeout (other coreutils) 1.0\n"
+  exit 0
+fi
+[[ $# -gt 0 ]] || exit 125
+shift
+exec "$@"
+'
 
   status=0
   run_rb_lite "$repo" run --task "timeout validation" --max-rounds 1 --max-iters 1 \
     --implement-cmd 'printf noop' --implement-timeout 1 \
     >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
 
-  assert_equals 3 "$status" "non-GNU timeout validation exit"
-  assert_file_contains /tmp/rb-lite-test.err 'GNU coreutils timeout'
+  assert_equals 3 "$status" "timeout without --kill-after validation exit"
+  assert_file_contains /tmp/rb-lite-test.err 'timeout'
+  assert_file_contains /tmp/rb-lite-test.err '.*--kill-after'
+}
+
+test_implement_timeout_accepts_uutils_timeout() {
+  local repo status
+  repo=$(new_repo)
+  write_fake "$repo" timeout '
+if [[ ${1:-} == --version ]]; then
+  printf "timeout (uutils coreutils) 0.8.0\n"
+  exit 0
+fi
+if [[ ${1:-} == --kill-after=* ]]; then
+  shift
+fi
+[[ $# -gt 0 ]] || exit 125
+shift
+exec "$@"
+'
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings.\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "timeout validation" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --implement-timeout 5 \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 0 "$status" "uutils timeout validation exit"
+  assert_file_contains /tmp/rb-lite-test.err 'round 1 implementer iteration 1 starting'
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
 }
 
 test_untracked_files_affect_stability() {
@@ -1385,7 +1427,7 @@ printf "%s\n" "$count" >"$count_file"
 }
 
 mkdir -p "$TMP_ROOT"
-require_gnu_timeout
+require_timeout_with_kill_after
 
 test_implementer_stops_when_stable
 test_progress_log_mirrors_to_stderr
@@ -1418,7 +1460,8 @@ test_env_reviewer_timeout_fails_stuck_reviewer
 test_signal_summary_preserves_signal_exit_code
 test_cli_implement_timeout_overrides_invalid_env
 test_cli_reviewer_timeout_overrides_invalid_env
-test_implement_timeout_requires_gnu_timeout
+test_implement_timeout_requires_kill_after_support
+test_implement_timeout_accepts_uutils_timeout
 test_untracked_files_affect_stability
 test_quoted_untracked_paths_affect_stability
 test_dirty_symlink_retarget_affects_stability
