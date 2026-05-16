@@ -80,12 +80,16 @@ Use --min-findings-severity P3 or RB_LITE_MIN_FINDINGS_SEVERITY=P3 to preserve
 the old strict P3 behavior.
 
 Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
-two-reviewer panel:
+three-reviewer panel:
   codex review --base "$BASE"
   claude -p "<P0..P3 review prompt>" --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"
-Both binaries must be on PATH. Override the panel by writing .rb-lite-reviewers.
+  npx -y @google/gemini-cli -p "<P0..P3 review prompt>"
+codex and claude must be on PATH. The Gemini reviewer also needs npx on PATH
+plus GEMINI_API_KEY or an OAuth login previously stored by gemini-cli. Without
+Gemini credentials, the third reviewer just fails and the panel falls back to
+codex+claude. Override the panel by writing .rb-lite-reviewers.
 The panel succeeds as long as at least one reviewer exits 0; failed reviewers
-are noted in latest-review.md but do not abort the run.
+are noted in their per-reviewer markdown files but do not abort the run.
 
 Reviewers run with stdin closed. Per-reviewer markdown files (one per reviewer,
 review-round-N-K.md) are passed to the implementer so it can weigh each
@@ -382,6 +386,7 @@ load_reviewers() {
     REVIEWERS=(
       'codex review --base "$BASE"'
       'claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). If there are no actionable findings, output exactly: No findings. Do not modify any files." --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"'
+      'if [[ -e node_modules/@google/gemini-cli || -L node_modules/@google/gemini-cli || -e node_modules/.bin/gemini || -L node_modules/.bin/gemini ]]; then printf "%s\n" "rb-lite: refusing to run default Gemini reviewer because this repository has a local Gemini CLI package/bin that npx could prefer; customize .rb-lite-reviewers if this is intentional" >&2; exit 1; fi; npx -y @google/gemini-cli -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). If there are no actionable findings, output exactly: No findings. Do not modify any files."'
     )
   fi
 }

@@ -1001,7 +1001,7 @@ test_reviewer_config_writes_per_reviewer_files() {
   [[ ! -e $run_dir/latest-review.md ]] || fail "latest-review.md should not exist (combined doc dropped)"
 }
 
-test_default_reviewer_panel_runs_codex_and_claude() {
+test_default_reviewer_panel_runs_codex_claude_and_gemini() {
   local repo run_dir
   repo=$(new_repo)
   run_dir="$repo/.rb-lite/default-panel"
@@ -1022,12 +1022,28 @@ mkdir -p .rb-lite
 printf "%s\n" "$*" >.rb-lite/claude-args
 printf "claude says clean\n"
 '
+  write_fake "$repo" npx '
+mkdir -p .rb-lite
+printf "%s\n" "$#" >.rb-lite/npx-argc
+i=1
+for arg in "$@"; do
+  printf "%s\n" "$arg" >".rb-lite/npx-arg-$i"
+  i=$((i + 1))
+done
+if [[ $# -ne 4 || ${1:-} != -y || ${2:-} != @google/gemini-cli || ${3:-} != -p ]]; then
+  printf "unexpected npx args: %s\n" "$*" >&2
+  exit 98
+fi
+printf "%s\n" "$4" >.rb-lite/gemini-prompt
+printf "gemini says clean\n"
+'
 
   run_rb_lite "$repo" run --task "default panel" --max-rounds 1 --max-iters 1 \
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
 
   assert_file_contains "$run_dir/review-round-1-1.md" 'codex says clean'
   assert_file_contains "$run_dir/review-round-1-2.md" 'claude says clean'
+  assert_file_contains "$run_dir/review-round-1-3.md" 'gemini says clean'
   assert_file_contains "$repo/.rb-lite/claude-args" 'permission-mode acceptEdits'
   assert_file_contains "$repo/.rb-lite/claude-args" 'allowedTools'
   assert_file_contains "$repo/.rb-lite/claude-args" 'Bash,Edit,Write,Read,Glob,Grep'
@@ -1035,6 +1051,51 @@ printf "claude says clean\n"
     fail "default claude reviewer must not use --dangerously-skip-permissions"
   fi
   assert_file_contains "$repo/.rb-lite/claude-args" 'base ref '
+  assert_equals 4 "$(cat "$repo/.rb-lite/npx-argc")" "default npx arg count"
+  assert_equals -y "$(cat "$repo/.rb-lite/npx-arg-1")" "default npx yes flag"
+  assert_equals @google/gemini-cli "$(cat "$repo/.rb-lite/npx-arg-2")" "default npx package"
+  assert_equals -p "$(cat "$repo/.rb-lite/npx-arg-3")" "default npx prompt flag"
+  assert_file_contains "$repo/.rb-lite/gemini-prompt" 'Read AGENTS\.md'
+  assert_file_contains "$repo/.rb-lite/gemini-prompt" 'base ref '
+  assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.rb-lite/'
+  assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.ralph-burning/'
+  assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.git/ralph-burning-live/'
+  assert_file_contains "$repo/.rb-lite/gemini-prompt" 'No findings\.'
+  assert_file_contains "$repo/.rb-lite/gemini-prompt" 'Do not modify any files'
+}
+
+test_default_gemini_reviewer_refuses_repo_local_package() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/local-gemini"
+  mkdir -p "$repo/node_modules/@google/gemini-cli"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" codex '
+case "${1:-}" in
+  review)
+    printf "codex says clean\n"
+    ;;
+  *)
+    printf "unexpected codex args: %s\n" "$*" >&2
+    exit 99
+    ;;
+esac
+'
+  write_fake "$repo" claude 'printf "claude says clean\n"'
+  write_fake "$repo" npx '
+mkdir -p .rb-lite
+printf "npx should not run when repo-local Gemini exists\n" >.rb-lite/npx-ran
+exit 98
+'
+
+  run_rb_lite "$repo" run --task "default panel local gemini guard" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
+  assert_file_contains "$run_dir/review-round-1-1.md" 'codex says clean'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'claude says clean'
+  assert_file_contains "$run_dir/review-round-1-3.md" 'refusing to run default Gemini reviewer'
+  [[ ! -e $repo/.rb-lite/npx-ran ]] || fail "default Gemini reviewer should not invoke repo-local npx target"
 }
 
 test_reviewer_exit_two_is_operational_failure() {
@@ -1248,7 +1309,8 @@ test_dirty_symlink_retarget_affects_stability
 test_rb_lite_artifacts_do_not_affect_stability
 test_custom_run_dir_does_not_affect_stability
 test_reviewer_config_writes_per_reviewer_files
-test_default_reviewer_panel_runs_codex_and_claude
+test_default_reviewer_panel_runs_codex_claude_and_gemini
+test_default_gemini_reviewer_refuses_repo_local_package
 test_reviewer_exit_two_is_operational_failure
 test_reviewer_stderr_excluded_from_combined_when_clean
 test_failed_reviewer_path_omitted_from_review_files

@@ -3,10 +3,10 @@
 [![CI](https://github.com/douglaz/rb-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/douglaz/rb-lite/actions/workflows/ci.yml)
 
 A small Bash CLI that drives an **implement → review** loop using
-[`codex`](https://github.com/openai/codex) and
-[`claude`](https://docs.anthropic.com/claude/docs/claude-code) as the
-implementer and reviewer panel. Repeatedly invokes the implementer until the
-git diff stabilizes, runs codex + claude in parallel as a review panel, feeds
+[`codex`](https://github.com/openai/codex) as the implementer and codex,
+[`claude`](https://docs.anthropic.com/claude/docs/claude-code), and
+Gemini CLI as the default reviewer panel. Repeatedly invokes the implementer
+until the git diff stabilizes, runs the reviewer panel in parallel, feeds
 P0/P1/P2 findings back into the implementer, and stops when the panel is
 clean, the implementer refuses to act on remaining findings, or a budget cap
 is hit.
@@ -28,7 +28,7 @@ nix run github:douglaz/rb-lite -- run \
 That single command:
 1. Builds rb-lite from source (cached after first run)
 2. Spawns codex as the implementer in your repo's working tree
-3. Loops implementer ↔ panel-reviewer (codex + claude in parallel)
+3. Loops implementer ↔ panel-reviewer (codex + claude, plus Gemini when available)
 4. Stops when the panel reports no actionable findings, exits clean
 
 Artifacts land in `.rb-lite/runs/<timestamp>-<pid>/`.
@@ -64,32 +64,35 @@ and (B) wrap those dependencies via Nix automatically.
 - `claude` CLI on `PATH`, authenticated. The default reviewer panel also
   includes `claude -p` running with `--permission-mode acceptEdits` and a
   broad allowed-tools list (matches the sister `ralph-burning` project).
+- `npx` on `PATH` plus Gemini credentials for the third default reviewer:
+  either `GEMINI_API_KEY` in the environment or an existing OAuth login stored
+  by `gemini-cli`. Without Gemini credentials, the panel silently degrades to
+  codex+claude.
 
 You can override or replace either side — see "Configuration" below.
 
 ## What it does, in one diagram
 
-```
-                        ┌───────────────────────────────────┐
-                        │ rb-lite run --task "..." --base X │
-                        └────────────────┬──────────────────┘
-                                         │
-                          ┌──────────────▼──────────────┐
-                          │ Implementer iteration loop  │
-                          │  • codex exec [resume ...]  │
-                          │  • repeat until git state   │
-                          │    stops changing           │
-                          └──────────────┬──────────────┘
-                                         │
-                          ┌──────────────▼──────────────┐
-                          │ Review panel (concurrent)   │
-                          │  • codex review --base X    │
-                          │  • claude -p "<prompt>"     │
-                          │  • each writes              │
-                          │    review-round-N-K.md      │
-                          └──────────────┬──────────────┘
-                                         │
-                                         ▼
+```text
+                 ┌───────────────────────────────────────────────────┐
+                 │       rb-lite run --task "..." --base X           │
+                 └───────────────────────────┬───────────────────────┘
+                                             │
+                 ┌───────────────────────────▼───────────────────────┐
+                 │ Implementer iteration loop                        │
+                 │  • codex exec [resume ...]                        │
+                 │  • repeat until git state stops changing          │
+                 └───────────────────────────┬───────────────────────┘
+                                             │
+                 ┌───────────────────────────▼───────────────────────┐
+                 │ Review panel (concurrent)                         │
+                 │  • codex review --base X                          │
+                 │  • claude -p "<prompt>"                           │
+                 │  • npx -y @google/gemini-cli -p "<prompt>"        │
+                 │  • each writes review-round-N-K.md                │
+                 └───────────────────────────┬───────────────────────┘
+                                             │
+                                             ▼
         clean (no P0/P1/P2)?  ──────► EXIT 0
         all reviewers failed?  ─────► EXIT 11
         max rounds hit?  ───────────► EXIT 12
@@ -150,6 +153,7 @@ The default panel is fine for most cases. To override, drop a
 # .rb-lite-reviewers
 codex review --base "$BASE"
 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
+npx -y @google/gemini-cli -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean."
 my-custom-linter --json | wrap-as-p-tags
 ```
 
@@ -235,7 +239,7 @@ the JSON on success; failure messages still go to stderr.
 # Enter a shell with bash, git, just, ripgrep
 nix develop
 
-# Run the smoke suite (fakes codex/claude — no API credentials needed)
+# Run the smoke suite (fakes codex/claude/Gemini — no API credentials needed)
 just test
 
 # Full local gate (lint + smoke + nix flake check)
@@ -243,7 +247,7 @@ just check
 ```
 
 The smoke tests cover the loop's behavior with fake implementer and reviewer
-binaries on `PATH`. They do not exercise live codex/claude.
+binaries on `PATH`. They do not exercise live codex/claude/Gemini.
 
 ## Notes
 
