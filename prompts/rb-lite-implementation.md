@@ -9,8 +9,8 @@ The target workflow is:
 
 1. Run an implementer agent repeatedly until the repository diff stops changing.
 2. Run a final review panel.
-3. If any reviewer reports P0/P1/P2/P3 findings, feed the combined review back
-   into the implementer loop.
+3. If any reviewer reports actionable P0/P1/P2 findings by default, feed the
+   review files back into the implementer loop.
 4. Stop when the final review panel is clean, or when configured caps are hit.
 
 This should be a compact, inspectable Bash tool. Do not recreate durable project
@@ -41,20 +41,28 @@ The implementation should live in `~/rb-lite`.
 - Detect implementer stability by fingerprinting git state before and after an
   implementer invocation. Include tracked, staged, unstaged, and untracked file
   content. Exclude `.git/`, `.rb-lite/`, and `.ralph-burning/`.
-- The default implementer command should be
+- There is no default implementer. Users must select `--implementer codex`,
+  `--implementer claude`, set `RB_LITE_IMPLEMENTER`, or provide a raw command
+  with `--implement-cmd` / `RB_LITE_IMPLEMENT_CMD`.
+- Resolve implementers in this order: `--implement-cmd`, `--implementer`,
+  `RB_LITE_IMPLEMENT_CMD`, then `RB_LITE_IMPLEMENTER`.
+- The `codex` implementer preset should run
   `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"`,
-  but make it configurable without editing the script.
+  resuming the prior same-round session with `codex exec resume` when
+  `RB_LITE_PREV_SESSION` is set.
+- The `claude` implementer preset should run
+  `claude -p "$PROMPT" --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"`.
 - The default implementer prompt should say:
 
 ```text
-Read AGENTS.md if present. If a review file is provided, address the findings
-in that review. Otherwise implement the requested work. Stop when no code or
+Read AGENTS.md if present. If review files are provided, address the findings
+in those reviews. Otherwise implement the requested work. Stop when no code or
 test changes are needed.
 ```
 
 - Support a user-supplied task prompt via either a command-line flag or prompt
-  file. The active review file path should be included in the implementer prompt
-  on remediation rounds.
+  file. The active per-reviewer review file paths should be included in the
+  implementer prompt on remediation rounds.
 - Implement a lightweight review panel:
   - default reviewer command: `codex review --base <base>`
   - default base ref: `origin/master`, configurable by flag/env
@@ -64,8 +72,8 @@ test changes are needed.
   - run reviewers concurrently
   - save each reviewer output
   - combine all reviewer outputs into `latest-review.md`
-  - consider the panel clean when no combined output contains a P0/P1/P2/P3
-    severity marker
+  - consider the panel clean when no successful reviewer output contains a
+    severity marker at or above the configured floor (P0/P1/P2 by default)
 - Keep the review panel intentionally simple. Do not implement voting, arbiter
   tie-breaking, quorum math, or reviewer amendment routing in this first version.
 - Provide clear exit codes:
@@ -78,6 +86,7 @@ Suggested CLI shape:
 
 ```bash
 bin/rb-lite run \
+  --implementer codex \
   --task "Fix the next ready bead" \
   --base origin/master \
   --max-rounds 25 \
@@ -89,11 +98,13 @@ Useful env/config knobs:
 - `RB_LITE_BASE`
 - `RB_LITE_MAX_ROUNDS`
 - `RB_LITE_MAX_ITERS`
+- `RB_LITE_IMPLEMENTER`
 - `RB_LITE_IMPLEMENT_CMD`
 - `RB_LITE_REVIEWERS_FILE`
 - `RB_LITE_RUN_DIR`
 
-Tests should use fake commands on `PATH`, not live `codex`. At minimum, cover:
+Tests should use fake commands on `PATH`, not live `codex` or `claude`. At
+minimum, cover:
 
 - implementer loop stops when the fake implementer no longer changes files
 - a P1 review finding triggers another implementer round
@@ -122,4 +133,5 @@ Also ignore `.git/ralph-burning-live/` and `.rb-lite/` runtime output.
   worktree recovery, daemon, PR automation, milestone, or durable project
   database feature.
 - The review panel supports multiple reviewer commands running concurrently and
-  aggregates P0/P1/P2/P3 findings into the next implementer round.
+  feeds actionable P0/P1/P2 findings into the next implementer round by default
+  while preserving a configurable P3 floor.

@@ -245,7 +245,7 @@ printf "%s\n" "$count" >"$count_file"
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
 
   assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
-  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "P3 default implementer count"
+  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "P3 default floor implementer count"
   assert_file_contains "$run_dir/log.txt" 'review panel clean \(floor P2\)'
 }
 
@@ -268,7 +268,7 @@ printf "%s\n" "$count" >"$count_file"
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
 
   assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
-  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "P3 body P2 default implementer count"
+  assert_equals 1 "$(cat "$repo/.rb-lite/implementer-count")" "P3 body P2 default floor implementer count"
   assert_file_contains "$run_dir/log.txt" 'review panel clean \(floor P2\)'
 }
 
@@ -307,7 +307,7 @@ fi
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
 
   assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 2 round'
-  assert_equals 3 "$(cat "$repo/.rb-lite/implementer-count")" "P2 default implementer count"
+  assert_equals 3 "$(cat "$repo/.rb-lite/implementer-count")" "P2 default floor implementer count"
   assert_file_contains "$repo/remediated.txt" 'saw P2 review'
   assert_file_contains "$repo/remediation-prompt.txt" 'Address the actionable P0/P1/P2 findings'
   if grep -q 'P0/P1/P2/P3 findings' "$repo/remediation-prompt.txt"; then
@@ -622,7 +622,7 @@ test_clean_review_exits_successfully() {
   assert_last_stdout_summary /tmp/rb-lite-test.out clean 0
 }
 
-test_default_implementer_uses_noninteractive_codex_exec() {
+test_codex_implementer_preset_uses_noninteractive_codex_exec() {
   local repo uuid
   repo=$(new_repo)
   uuid=11111111-2222-3333-4444-555555555555
@@ -664,33 +664,202 @@ fi
 '
   write_reviewers "$repo" fake-reviewer
 
-  run_rb_lite "$repo" run --task "default prompt marker" --max-rounds 2 --max-iters 4 \
+  run_rb_lite "$repo" run --task "codex preset prompt marker" --max-rounds 2 --max-iters 4 \
+    --implementer codex \
     >/tmp/rb-lite-test.out
 
-  assert_equals 4 "$(cat "$repo/.rb-lite/codex-count")" "default codex call count"
-  assert_equals 4 "$(cat "$repo/.rb-lite/codex-1-argc")" "default codex arg count"
-  assert_equals exec "$(cat "$repo/.rb-lite/codex-1-arg1")" "default codex subcommand"
-  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-1-arg2")" "default codex approval flag"
-  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-1-arg3")" "default codex repo flag"
+  assert_equals 4 "$(cat "$repo/.rb-lite/codex-count")" "codex preset call count"
+  assert_equals 4 "$(cat "$repo/.rb-lite/codex-1-argc")" "codex preset arg count"
+  assert_equals exec "$(cat "$repo/.rb-lite/codex-1-arg1")" "codex preset subcommand"
+  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-1-arg2")" "codex preset approval flag"
+  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-1-arg3")" "codex preset repo flag"
   assert_file_contains "$repo/.rb-lite/codex-1-arg4" 'Read AGENTS\.md'
-  assert_file_contains "$repo/.rb-lite/codex-1-arg4" 'default prompt marker'
+  assert_file_contains "$repo/.rb-lite/codex-1-arg4" 'codex preset prompt marker'
   assert_equals 6 "$(cat "$repo/.rb-lite/codex-2-argc")" "resume codex arg count"
   assert_equals exec "$(cat "$repo/.rb-lite/codex-2-arg1")" "resume codex subcommand"
   assert_equals resume "$(cat "$repo/.rb-lite/codex-2-arg2")" "resume codex command"
   assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-2-arg3")" "resume codex approval flag"
   assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-2-arg4")" "resume codex repo flag"
   assert_equals "$uuid" "$(cat "$repo/.rb-lite/codex-2-arg5")" "resume codex session id"
-  assert_file_contains "$repo/.rb-lite/codex-2-arg6" 'default prompt marker'
-  assert_equals 4 "$(cat "$repo/.rb-lite/codex-3-argc")" "default codex drops stale session arg count"
-  assert_equals exec "$(cat "$repo/.rb-lite/codex-3-arg1")" "default codex drops stale session subcommand"
-  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-3-arg2")" "default codex drops stale session approval flag"
-  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-3-arg3")" "default codex drops stale session repo flag"
-  assert_file_contains "$repo/.rb-lite/codex-3-arg4" 'default prompt marker'
-  assert_equals 4 "$(cat "$repo/.rb-lite/codex-4-argc")" "default codex round reset arg count"
-  assert_equals exec "$(cat "$repo/.rb-lite/codex-4-arg1")" "default codex round reset subcommand"
-  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-4-arg2")" "default codex round reset approval flag"
-  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-4-arg3")" "default codex round reset repo flag"
+  assert_file_contains "$repo/.rb-lite/codex-2-arg6" 'codex preset prompt marker'
+  assert_equals 4 "$(cat "$repo/.rb-lite/codex-3-argc")" "codex preset drops stale session arg count"
+  assert_equals exec "$(cat "$repo/.rb-lite/codex-3-arg1")" "codex preset drops stale session subcommand"
+  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-3-arg2")" "codex preset drops stale session approval flag"
+  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-3-arg3")" "codex preset drops stale session repo flag"
+  assert_file_contains "$repo/.rb-lite/codex-3-arg4" 'codex preset prompt marker'
+  assert_equals 4 "$(cat "$repo/.rb-lite/codex-4-argc")" "codex preset round reset arg count"
+  assert_equals exec "$(cat "$repo/.rb-lite/codex-4-arg1")" "codex preset round reset subcommand"
+  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/codex-4-arg2")" "codex preset round reset approval flag"
+  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/codex-4-arg3")" "codex preset round reset repo flag"
   assert_file_contains "$repo/.rb-lite/codex-4-arg4" 'Review files'
+}
+
+test_claude_implementer_preset_uses_headless_accept_edits() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" claude '
+mkdir -p .rb-lite
+printf "%s\n" "$#" >.rb-lite/claude-argc
+i=1
+for arg in "$@"; do
+  printf "%s\n" "$arg" >".rb-lite/claude-arg$i"
+  i=$((i + 1))
+done
+'
+  write_fake "$repo" fake-reviewer 'printf "Clean review\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "claude preset task marker" --max-rounds 1 --max-iters 1 \
+    --implementer claude >/tmp/rb-lite-test.out
+
+  assert_equals 6 "$(cat "$repo/.rb-lite/claude-argc")" "claude preset arg count"
+  assert_equals -p "$(cat "$repo/.rb-lite/claude-arg1")" "claude prompt flag"
+  assert_file_contains "$repo/.rb-lite/claude-arg2" 'claude preset task marker'
+  assert_equals --permission-mode "$(cat "$repo/.rb-lite/claude-arg3")" "claude permission flag"
+  assert_equals acceptEdits "$(cat "$repo/.rb-lite/claude-arg4")" "claude permission mode"
+  assert_equals --allowedTools "$(cat "$repo/.rb-lite/claude-arg5")" "claude allowed-tools flag"
+  assert_file_contains "$repo/.rb-lite/claude-arg6" 'Bash,Edit,Write,Read,Glob,Grep'
+  if grep -q -- '--dangerously-skip-permissions' "$repo"/.rb-lite/claude-arg*; then
+    fail "claude preset must not use --dangerously-skip-permissions"
+  fi
+}
+
+test_missing_implementer_is_usage_error_with_summary() {
+  local repo status
+  repo=$(new_repo)
+
+  status=0
+  (
+    cd "$repo"
+    unset RB_LITE_IMPLEMENT_CMD RB_LITE_IMPLEMENTER
+    PATH="$repo/fakes:$PATH" "$repo/bin/rb-lite" run --task "missing implementer" \
+      --max-rounds 1 --max-iters 1
+  ) >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 2 "$status" "missing implementer exit"
+  assert_file_contains /tmp/rb-lite-test.err 'an implementer is required'
+  assert_last_stdout_summary /tmp/rb-lite-test.out usage_error 2
+}
+
+test_empty_cli_implement_cmd_is_usage_error_with_summary() {
+  local repo status
+  repo=$(new_repo)
+  write_fake "$repo" fake-reviewer 'printf "Clean review\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "empty raw command" --max-rounds 1 --max-iters 1 \
+    --implement-cmd "" >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 2 "$status" "empty implement-cmd exit"
+  assert_file_contains /tmp/rb-lite-test.err 'implement-cmd was set to an empty command'
+  assert_last_stdout_summary /tmp/rb-lite-test.out usage_error 2
+}
+
+test_invalid_implementer_is_usage_error() {
+  local repo status
+  repo=$(new_repo)
+
+  status=0
+  run_rb_lite "$repo" run --task "invalid implementer" --implementer bogus \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 2 "$status" "invalid implementer exit"
+  assert_file_contains /tmp/rb-lite-test.err 'implementer must be one of claude, codex'
+  assert_last_stdout_summary /tmp/rb-lite-test.out usage_error 2
+}
+
+test_invalid_env_implementer_is_usage_error() {
+  local repo status
+  repo=$(new_repo)
+
+  status=0
+  (
+    cd "$repo"
+    unset RB_LITE_IMPLEMENT_CMD
+    PATH="$repo/fakes:$PATH" RB_LITE_IMPLEMENTER=bogus "$repo/bin/rb-lite" run \
+      --task "invalid env implementer"
+  ) >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 2 "$status" "invalid env implementer exit"
+  assert_file_contains /tmp/rb-lite-test.err 'RB_LITE_IMPLEMENTER must be one of claude, codex'
+  assert_last_stdout_summary /tmp/rb-lite-test.out usage_error 2
+}
+
+test_env_implementer_codex_selects_codex_preset() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" codex '
+mkdir -p .rb-lite
+printf "%s\n" "$#" >.rb-lite/env-codex-argc
+i=1
+for arg in "$@"; do
+  printf "%s\n" "$arg" >".rb-lite/env-codex-arg$i"
+  i=$((i + 1))
+done
+'
+  write_fake "$repo" fake-reviewer 'printf "Clean review\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  (
+    cd "$repo"
+    unset RB_LITE_IMPLEMENT_CMD
+    PATH="$repo/fakes:$PATH" RB_LITE_IMPLEMENTER=codex "$repo/bin/rb-lite" run \
+      --task "env codex preset" --max-rounds 1 --max-iters 1
+  ) >/tmp/rb-lite-test.out
+
+  assert_equals 4 "$(cat "$repo/.rb-lite/env-codex-argc")" "env codex preset arg count"
+  assert_equals exec "$(cat "$repo/.rb-lite/env-codex-arg1")" "env codex preset subcommand"
+  assert_equals --dangerously-bypass-approvals-and-sandbox "$(cat "$repo/.rb-lite/env-codex-arg2")" "env codex preset approval flag"
+  assert_equals --skip-git-repo-check "$(cat "$repo/.rb-lite/env-codex-arg3")" "env codex preset repo flag"
+  assert_file_contains "$repo/.rb-lite/env-codex-arg4" 'env codex preset'
+}
+
+test_cli_implement_cmd_takes_precedence_over_implementer() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" codex '
+mkdir -p .rb-lite
+printf "codex preset ran\n" >.rb-lite/codex-ran
+exit 44
+'
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+printf "raw command ran\n" >.rb-lite/raw-command-ran
+'
+  write_fake "$repo" fake-reviewer 'printf "Clean review\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "raw command precedence" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --implementer codex >/tmp/rb-lite-test.out
+
+  assert_file_contains "$repo/.rb-lite/raw-command-ran" 'raw command ran'
+  [[ ! -e $repo/.rb-lite/codex-ran ]] || fail "--implement-cmd should prevent codex preset from running"
+}
+
+test_env_implement_cmd_takes_precedence_over_env_implementer() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" codex '
+mkdir -p .rb-lite
+printf "env codex preset ran\n" >.rb-lite/env-codex-ran
+exit 44
+'
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+printf "env raw command ran\n" >.rb-lite/env-raw-command-ran
+'
+  write_fake "$repo" fake-reviewer 'printf "Clean review\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_IMPLEMENT_CMD='fake-implementer' RB_LITE_IMPLEMENTER=codex "$repo/bin/rb-lite" run \
+      --task "env raw command precedence" --max-rounds 1 --max-iters 1
+  ) >/tmp/rb-lite-test.out
+
+  assert_file_contains "$repo/.rb-lite/env-raw-command-ran" 'env raw command ran'
+  [[ ! -e $repo/.rb-lite/env-codex-ran ]] || fail "RB_LITE_IMPLEMENT_CMD should prevent RB_LITE_IMPLEMENTER preset from running"
 }
 
 test_implementer_session_resume_resets_at_round_boundary() {
@@ -1449,7 +1618,15 @@ test_run_dir_setup_failure_exits_3
 test_run_log_setup_failure_exits_3
 test_branch_creation_failure_exits_3
 test_clean_review_exits_successfully
-test_default_implementer_uses_noninteractive_codex_exec
+test_codex_implementer_preset_uses_noninteractive_codex_exec
+test_claude_implementer_preset_uses_headless_accept_edits
+test_missing_implementer_is_usage_error_with_summary
+test_empty_cli_implement_cmd_is_usage_error_with_summary
+test_invalid_implementer_is_usage_error
+test_invalid_env_implementer_is_usage_error
+test_env_implementer_codex_selects_codex_preset
+test_cli_implement_cmd_takes_precedence_over_implementer
+test_env_implement_cmd_takes_precedence_over_env_implementer
 test_implementer_session_resume_resets_at_round_boundary
 test_implementer_session_resume_picks_first_match
 test_env_implement_cmd_override_still_wins

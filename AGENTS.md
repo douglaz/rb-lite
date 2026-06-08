@@ -11,10 +11,12 @@ avoid recreating ralph-burning's durable orchestration stack.
 - The useful scope is: run an implementer loop until the git diff stabilizes,
   run a lightweight final review panel, feed actionable review findings back
   into the next implementer round, and stop when clean or capped.
+- There is no default implementer. Users must choose `--implementer claude`,
+  `--implementer codex`, or provide a raw `--implement-cmd`.
 - Prefer visible files and simple commands over hidden state. Runtime logs may
   live under `.rb-lite/`, and `.rb-lite/` must be ignored by git.
-- Keep tests deterministic by using fake `codex`/reviewer commands. Do not rely
-  on live model credentials in tests.
+- Keep tests deterministic by using fake `codex`/`claude`/reviewer commands.
+  Do not rely on live model credentials in tests.
 - Use `just` for local task recipes instead of `make`.
 - Verification should include `just test`, `nix build`, and `nix flake check`.
   Do not introduce a Rust crate or Cargo workflow.
