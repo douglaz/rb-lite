@@ -2,32 +2,32 @@
 
 [![CI](https://github.com/douglaz/rb-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/douglaz/rb-lite/actions/workflows/ci.yml)
 
-A small Bash CLI that drives an **implement → review** loop using
-[`codex`](https://github.com/openai/codex) as the implementer and codex,
-[`claude`](https://docs.anthropic.com/claude/docs/claude-code), and
-Gemini CLI as the default reviewer panel. Repeatedly invokes the implementer
-until the git diff stabilizes, runs the reviewer panel in parallel, feeds
-P0/P1/P2 findings back into the implementer, and stops when the panel is
-clean, the implementer refuses to act on remaining findings, or a budget cap
-is hit.
+A small Bash CLI that drives an **implement → review** loop using an explicit
+`claude` or `codex` implementer preset (or a custom command) and codex,
+[`claude`](https://docs.anthropic.com/claude/docs/claude-code), and Gemini CLI
+as the default reviewer panel. Repeatedly invokes the implementer until the
+git diff stabilizes, runs the reviewer panel in parallel, feeds P0/P1/P2
+findings back into the implementer, and stops when the panel is clean, the
+implementer refuses to act on remaining findings, or a budget cap is hit.
 
 Entirely in shell, no daemons, no state DB, runs in any git repo.
 
 ## Quick start
 
-You need a git working tree, the `codex` and `claude` CLIs on `PATH`
-(authenticated to whichever backend you use), and `nix` with flakes enabled.
+You need a git working tree, an explicit implementer choice, the reviewer CLIs
+you use on `PATH`, and `nix` with flakes enabled.
 
 ```bash
 # Run the latest version straight from GitHub (no install)
 nix run github:douglaz/rb-lite -- run \
+  --implementer codex \
   --task "Address whatever needs fixing on this branch" \
   --base origin/main
 ```
 
 That single command:
 1. Builds rb-lite from source (cached after first run)
-2. Spawns codex as the implementer in your repo's working tree
+2. Spawns the selected implementer preset in your repo's working tree
 3. Loops implementer ↔ panel-reviewer (codex + claude, plus Gemini when available)
 4. Stops when the panel reports no actionable findings, exits clean
 
@@ -39,16 +39,16 @@ Pick one:
 
 ```bash
 # A) Run on demand without installing
-nix run github:douglaz/rb-lite -- run --task "..." --base origin/main
+nix run github:douglaz/rb-lite -- run --implementer codex --task "..." --base origin/main
 
 # B) Install into your user profile
 nix profile install github:douglaz/rb-lite
-rb-lite run --task "..." --base origin/main
+rb-lite run --implementer codex --task "..." --base origin/main
 
 # C) Clone and run from source (if you want to hack on it)
 git clone https://github.com/douglaz/rb-lite.git
 cd rb-lite
-bin/rb-lite run --task "..." --base origin/main
+bin/rb-lite run --implementer codex --task "..." --base origin/main
 ```
 
 For (C), the script needs `bash`, `git`, and standard coreutils on `PATH`. (A)
@@ -57,13 +57,17 @@ and (B) wrap those dependencies via Nix automatically.
 ## Prerequisites
 
 - A git repository (rb-lite refuses to run outside one).
-- `codex` CLI on `PATH`, authenticated. The default implementer is
+- An explicit implementer: `--implementer codex`, `--implementer claude`, or
+  `--implement-cmd '...'`. There is no default implementer.
+- `codex` CLI on `PATH`, authenticated, if you use `--implementer codex` or
+  the default reviewer panel. The codex preset runs
   `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"`,
   reusing the same session within a round when possible. The default reviewer
   panel includes `codex review`.
-- `claude` CLI on `PATH`, authenticated. The default reviewer panel also
-  includes `claude -p` running with `--permission-mode acceptEdits` and a
-  broad allowed-tools list (matches the sister `ralph-burning` project).
+- `claude` CLI on `PATH`, authenticated, if you use `--implementer claude` or
+  the default reviewer panel. The claude preset and default reviewer both use
+  `claude -p` with `--permission-mode acceptEdits` and a broad allowed-tools
+  list (matches the sister `ralph-burning` project).
 - `npx` on `PATH` plus Gemini credentials for the third default reviewer:
   either `GEMINI_API_KEY` in the environment or an existing OAuth login stored
   by `gemini-cli`. rb-lite grants the reviewer full tool access (shell exec,
@@ -83,12 +87,12 @@ You can override or replace either side — see "Configuration" below.
 
 ```text
                  ┌───────────────────────────────────────────────────┐
-                 │       rb-lite run --task "..." --base X           │
+                 │ rb-lite run --implementer codex --task "..."      │
                  └───────────────────────────┬───────────────────────┘
                                              │
                  ┌───────────────────────────▼───────────────────────┐
                  │ Implementer iteration loop                        │
-                 │  • codex exec [resume ...]                        │
+                 │  • selected preset or --implement-cmd             │
                  │  • repeat until git state stops changing          │
                  └───────────────────────────┬───────────────────────┘
                                              │
@@ -112,6 +116,7 @@ You can override or replace either side — see "Configuration" below.
 
 ```bash
 rb-lite run \
+  --implementer codex \
   --task "Fix the next ready bead" \
   --base origin/main \
   --max-rounds 25 \
@@ -130,7 +135,8 @@ Common flags (full list: `rb-lite --help`):
 | `--min-findings-severity LEVEL` | `P2` | Lowest severity that triggers another round (`P0`/`P1`/`P2`/`P3`) |
 | `--implement-timeout SECS` | 14400 | SIGTERM/SIGKILL each implementer iteration if it runs longer |
 | `--reviewer-timeout SECS` | 1800 | SIGTERM/SIGKILL each reviewer if it runs longer; empty disables |
-| `--implement-cmd CMD` | codex shell | Override the implementer subprocess |
+| `--implementer NAME` | none | Select an implementer preset (`claude` or `codex`); required unless `--implement-cmd` or env equivalent is set |
+| `--implement-cmd CMD` | none | Raw implementer subprocess escape hatch; takes precedence over presets |
 | `--reviewers-file PATH` | `.rb-lite-reviewers` | Custom reviewer panel (one shell command per line) |
 | `--branch NAME` | none | `git switch -c NAME` before starting |
 | `--run-dir PATH` | `.rb-lite/runs/<id>` | Where to store run artifacts |
@@ -190,8 +196,16 @@ the panel as long as at least one reviewer succeeds.
 ## Customizing the implementer
 
 ```bash
+rb-lite run --implementer codex --task "..."
+rb-lite run --implementer claude --task "..."
 rb-lite run --implement-cmd 'my-implementer "$PROMPT"' --task "..."
 ```
+
+rb-lite has no default implementer. Choose `--implementer codex`,
+`--implementer claude`, set `RB_LITE_IMPLEMENTER`, or provide a raw command
+with `--implement-cmd` / `RB_LITE_IMPLEMENT_CMD`. Raw commands are used
+verbatim. Resolution order is `--implement-cmd`, `--implementer`,
+`RB_LITE_IMPLEMENT_CMD`, then `RB_LITE_IMPLEMENTER`.
 
 The implementer command receives:
 
@@ -240,6 +254,7 @@ the JSON on success; failure messages still go to stderr.
 - `RB_LITE_MAX_ITERS`
 - `RB_LITE_IMPLEMENT_TIMEOUT`
 - `RB_LITE_REVIEWER_TIMEOUT` (empty disables reviewer timeouts)
+- `RB_LITE_IMPLEMENTER`
 - `RB_LITE_IMPLEMENT_CMD`
 - `RB_LITE_SESSION_REGEX`
 - `RB_LITE_REVIEWERS_FILE`

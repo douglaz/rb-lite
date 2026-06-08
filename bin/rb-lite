@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
-IMPLEMENT_TIMEOUT_KILL_AFTER=5s
+TIMEOUT_KILL_AFTER=5s
+readonly TIMEOUT_KILL_AFTER
 readonly EXIT_USAGE=2
 readonly EXIT_ENV=3
 readonly EXIT_IMPLEMENTER=10
@@ -49,8 +50,12 @@ Options:
                           binary on PATH that supports --kill-after (GNU
                           coreutils or uutils). Default:
                           RB_LITE_REVIEWER_TIMEOUT or 1800 (30 minutes).
-  --implement-cmd CMD     Implementer shell command. Default: RB_LITE_IMPLEMENT_CMD or
-                          codex exec, resuming same-round sessions when available.
+  --implementer NAME      Implementer preset to use. One of claude, codex.
+                          Default: RB_LITE_IMPLEMENTER. There is no built-in
+                          default; an implementer or implement-cmd is required.
+  --implement-cmd CMD     Raw implementer shell command escape hatch. Takes
+                          precedence over implementer presets. Default:
+                          RB_LITE_IMPLEMENT_CMD.
   --reviewers-file PATH   Reviewer command file. Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
   --min-findings-severity LEVEL
                           Minimum reviewer finding severity that triggers another round.
@@ -70,6 +75,7 @@ Environment:
   RB_LITE_REVIEWER_TIMEOUT
                           Default reviewer command timeout in seconds; empty
                           disables reviewer timeouts.
+  RB_LITE_IMPLEMENTER     Default implementer preset. One of claude, codex.
   RB_LITE_IMPLEMENT_CMD   Shell command run for each implementer iteration.
   RB_LITE_PREV_SESSION    Exported to the implementer with the prior same-round session ID.
   RB_LITE_SESSION_REGEX   Bash ERE for session IDs in implementer stderr; empty disables capture.
@@ -78,7 +84,9 @@ Environment:
                           Default minimum reviewer finding severity. Default: P2.
   RB_LITE_RUN_DIR         Explicit run artifact directory.
 
-The default implementer starts with codex exec using noninteractive flags, then
+There is no default implementer. Pass --implementer claude|codex,
+--implement-cmd, or the matching RB_LITE_IMPLEMENTER/RB_LITE_IMPLEMENT_CMD env
+var. The codex preset starts with codex exec using noninteractive flags, then
 uses codex exec resume with the same flags on later iterations in the same
 round after capturing a session ID from stderr. Override RB_LITE_SESSION_REGEX
 to support non-codex session ID formats, or set it empty to disable capture.
@@ -142,6 +150,23 @@ die_with() {
 
 die() {
   die_with "$EXIT_USAGE" "$@"
+}
+
+set_implement_cmd_from_preset() {
+  local name=$1
+  local source=$2
+
+  case $name in
+    claude)
+      implement_cmd='claude -p "$PROMPT" --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"'
+      ;;
+    codex)
+      implement_cmd='if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'
+      ;;
+    *)
+      die "$source must be one of claude, codex"
+      ;;
+  esac
 }
 
 log_msg() {
@@ -318,7 +343,7 @@ run_implementer_loop() {
   if [[ -n $implement_timeout ]]; then
     # timeout's default mode signals the command process group, covering
     # children spawned by the implementer shell.
-    implementer_argv=(timeout --kill-after="$IMPLEMENT_TIMEOUT_KILL_AFTER" "$implement_timeout" bash -c "$command")
+    implementer_argv=(timeout --kill-after="$TIMEOUT_KILL_AFTER" "$implement_timeout" bash -c "$command")
   else
     implementer_argv=(bash -c "$command")
   fi
@@ -482,7 +507,7 @@ run_review_panel() {
     stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
     stderr="$RUN_DIR/reviewer-round-${round}-${idx}.stderr"
     if [[ -n $reviewer_timeout ]]; then
-      reviewer_argv=(timeout --kill-after="$IMPLEMENT_TIMEOUT_KILL_AFTER" "$reviewer_timeout" bash -c "$command")
+      reviewer_argv=(timeout --kill-after="$TIMEOUT_KILL_AFTER" "$reviewer_timeout" bash -c "$command")
     else
       reviewer_argv=(bash -c "$command")
     fi
@@ -545,7 +570,8 @@ run_command() {
   local max_iters=${RB_LITE_MAX_ITERS:-25}
   local implement_timeout=${RB_LITE_IMPLEMENT_TIMEOUT:-14400}
   local reviewer_timeout=${RB_LITE_REVIEWER_TIMEOUT-1800}
-  local implement_cmd=${RB_LITE_IMPLEMENT_CMD:-'if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'}
+  local implement_cmd=
+  local implementer=
   local reviewers_file=${RB_LITE_REVIEWERS_FILE:-.rb-lite-reviewers}
   local min_findings_severity=${RB_LITE_MIN_FINDINGS_SEVERITY:-P2}
   local findings_severity_pattern=
@@ -561,6 +587,8 @@ run_command() {
   local task=
   local task_file=
   local branch=
+  local implement_cmd_set=0
+  local implementer_set=0
   local root round round_before round_after noop_round_streak
   local -a review_paths=()
 
@@ -606,9 +634,16 @@ run_command() {
         reviewer_timeout=$2
         shift 2
         ;;
+      --implementer)
+        (($# >= 2)) || die "--implementer requires a value"
+        implementer=$2
+        implementer_set=1
+        shift 2
+        ;;
       --implement-cmd)
         (($# >= 2)) || die "--implement-cmd requires a value"
         implement_cmd=$2
+        implement_cmd_set=1
         shift 2
         ;;
       --reviewers-file)
@@ -656,6 +691,18 @@ run_command() {
     P3) findings_severity_digits=0-3; actionable_findings_severities=P0/P1/P2/P3 ;;
     *) die "--min-findings-severity must be one of P0, P1, P2, P3" ;;
   esac
+  if (( implement_cmd_set )); then
+    [[ -n $implement_cmd ]] \
+      || die "--implement-cmd was set to an empty command"
+  elif (( implementer_set )); then
+    set_implement_cmd_from_preset "$implementer" "--implementer"
+  elif [[ -n ${RB_LITE_IMPLEMENT_CMD:-} ]]; then
+    implement_cmd=$RB_LITE_IMPLEMENT_CMD
+  elif [[ -n ${RB_LITE_IMPLEMENTER:-} ]]; then
+    set_implement_cmd_from_preset "$RB_LITE_IMPLEMENTER" "RB_LITE_IMPLEMENTER"
+  else
+    die "an implementer is required: pass --implementer claude|codex or --implement-cmd"
+  fi
   SUMMARY_MAX_ROUNDS=$max_rounds
   SUMMARY_MAX_ITERS=$max_iters
   SUMMARY_MAX_NOOP_ROUNDS=$max_noop_rounds
