@@ -79,7 +79,12 @@ and (B) wrap those dependencies via Nix automatically.
   the reviewer fails and the panel falls back to codex+claude. rb-lite
   intentionally does NOT pass `--skip-trust`, so a malicious in-repo
   `.gemini/settings.json` from an untrusted PR cannot inject hooks or MCP
-  servers into the review.
+  servers into the review. As a further safeguard, the default Gemini reviewer
+  refuses to run when the repository has a local `@google/gemini-cli` package or
+  `gemini` bin under `node_modules/` (which `npx` could prefer over the pinned
+  package); it logs a refusal to stderr and the panel falls back to codex+claude.
+  Write your own `.rb-lite-reviewers` if running a repo-local Gemini CLI is
+  intentional.
 
 You can override or replace either side — see "Configuration" below.
 
@@ -141,8 +146,9 @@ Common flags (full list: `rb-lite --help`):
 | `--branch NAME` | none | `git switch -c NAME` before starting |
 | `--run-dir PATH` | `.rb-lite/runs/<id>` | Where to store run artifacts |
 
-Each flag has a matching env var (`RB_LITE_BASE`, `RB_LITE_MAX_ROUNDS`, …);
-precedence is CLI flag > env var > default.
+Most flags have a matching env var (`RB_LITE_BASE`, `RB_LITE_MAX_ROUNDS`, …);
+precedence is CLI flag > env var > default. (`--task`, `--task-file`, and
+`--branch` are CLI-only.)
 
 ## Run artifacts
 
@@ -167,7 +173,7 @@ The default panel is fine for most cases. To override, drop a
 ```
 # .rb-lite-reviewers
 codex review --base "$BASE"
-claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep"
+claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"
 npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean."
 my-custom-linter --json | wrap-as-p-tags
 ```
