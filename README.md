@@ -65,9 +65,15 @@ and (B) wrap those dependencies via Nix automatically.
   reusing the same session within a round when possible. The default reviewer
   panel includes `codex review`.
 - `claude` CLI on `PATH`, authenticated, if you use `--implementer claude` or
-  the default reviewer panel. The claude preset and default reviewer both use
-  `claude -p` with `--permission-mode acceptEdits` and a broad allowed-tools
-  list (matches the sister `ralph-burning` project).
+  the default reviewer panel. The claude implementer preset uses `claude -p`
+  with `--permission-mode acceptEdits --output-format stream-json --verbose`
+  and a broad allowed-tools list (matches the sister `ralph-burning` project).
+- `jq` on `PATH` if you use the default reviewer panel from a source checkout
+  (Nix installs wrap it automatically). The default claude reviewer uses
+  `claude -p` with `--output-format json` and pipes stdout through
+  `jq -er 'if .is_error then error(.result // "claude reviewer returned is_error") else (.result // empty) end'`
+  so findings text remains parseable on stdout and Claude errors or missing
+  results fail the reviewer.
 - `npx` on `PATH` plus Gemini credentials for the third default reviewer:
   either `GEMINI_API_KEY` in the environment or an existing OAuth login stored
   by `gemini-cli`. rb-lite grants the reviewer full tool access (shell exec,
@@ -104,7 +110,8 @@ You can override or replace either side — see "Configuration" below.
                  ┌───────────────────────────▼───────────────────────┐
                  │ Review panel (concurrent)                         │
                  │  • codex review --base X                          │
-                 │  • claude -p "<prompt>"                           │
+                 │  • claude -p "<prompt>" --output-format json      │
+                 │    | jq -er '<extract .result; fail on is_error>' │
                  │  • npx -y @google/gemini-cli --policy … -p "…"    │
                  │  • each writes review-round-N-K.md                │
                  └───────────────────────────┬───────────────────────┘
@@ -173,16 +180,18 @@ The default panel is fine for most cases. To override, drop a
 ```
 # .rb-lite-reviewers
 codex review --base "$BASE"
-claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"
+set -o pipefail; claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --permission-mode acceptEdits --output-format json --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .is_error then error(.result // "claude reviewer returned is_error") else (.result // empty) end'
 npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean."
 my-custom-linter --json | wrap-as-p-tags
 ```
 
 Reviewers run **concurrently**, each gets `BASE`, `RUN_DIR`, `ROUND`,
-`REVIEWER_INDEX` in env, and stdin closed. By default, each reviewer is
-wrapped in `timeout` (default 30m); a timed-out reviewer counts as a failed
-reviewer and is recorded in its per-reviewer markdown file, but does not abort
-the panel as long as at least one reviewer succeeds.
+`REVIEWER_INDEX` in env, and stdin closed. The default claude reviewer requires
+`jq` because it extracts `.result` from `claude --output-format json` and fails
+when Claude reports `is_error`. By default, each reviewer is wrapped in
+`timeout` (default 30m); a timed-out reviewer counts as a failed reviewer and is
+recorded in its per-reviewer markdown file, but does not abort the panel as long
+as at least one reviewer succeeds.
 
 ### Reviewer contract
 
@@ -213,6 +222,15 @@ with `--implement-cmd` / `RB_LITE_IMPLEMENT_CMD`. Raw commands are used
 verbatim. Resolution order is `--implement-cmd`, `--implementer`,
 `RB_LITE_IMPLEMENT_CMD`, then `RB_LITE_IMPLEMENTER`.
 
+The claude implementer preset runs:
+
+```bash
+claude -p "$PROMPT" --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"
+```
+
+rb-lite ignores the implementer's stdout; the preset still runs Claude's agentic
+editing loop in the working tree.
+
 The implementer command receives:
 
 | Env var | Meaning |
@@ -223,9 +241,9 @@ The implementer command receives:
 | `RUN_DIR` | Absolute path to the run-artifact dir |
 | `ROUND` / `ITERATION` | Current round and iteration numbers |
 
-Custom implementers should read `REVIEW_FILES` (or just rely on `PROMPT`,
-which enumerates the paths). The legacy `REVIEW_FILE` (singular,
-combined-doc) env var was removed.
+Implementers run with stdin closed. Custom implementers should read
+`REVIEW_FILES` (or just rely on `PROMPT`, which enumerates the paths). The
+legacy `REVIEW_FILE` (singular, combined-doc) env var was removed.
 
 ## Stop conditions and exit codes
 
