@@ -27,6 +27,7 @@
             pkgs.git
             pkgs.gnugrep
             pkgs.gnused
+            pkgs.jq
           ];
         in
         {

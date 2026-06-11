@@ -90,6 +90,30 @@ write_fake() {
   chmod +x "$repo/fakes/$name"
 }
 
+write_fake_jq_result_extractor() {
+  local repo=$1
+  write_fake "$repo" jq '
+expected="if .is_error then error(.result // \"claude reviewer returned is_error\") else (.result // empty) end"
+if [[ ${1:-} != -er || ${2:-} != "$expected" ]]; then
+  printf "unexpected jq args: %s\n" "$*" >&2
+  exit 94
+fi
+input=$(cat)
+if [[ $input == *"\"is_error\":true"* || $input == *"\"is_error\": true"* ]]; then
+  result=${input#*\"result\":\"}
+  result=${result%%\"*}
+  printf "jq: error: %s\n" "$result" >&2
+  exit 5
+fi
+result=${input#*\"result\":\"}
+if [[ $result == "$input" ]]; then
+  exit 4
+fi
+result=${result%%\"*}
+printf "%s\n" "$result"
+'
+}
+
 write_reviewers() {
   local repo=$1
   shift
@@ -127,6 +151,27 @@ fi
 
   assert_equals 2 "$(cat "$repo/.rb-lite/implementer-count")" "implementer call count"
   assert_file_contains "$repo/changed.txt" 'changed'
+}
+
+test_implementer_stdin_is_closed() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+if IFS= read -r line; then
+  printf "unexpected stdin: %s\n" "$line" >&2
+  exit 88
+fi
+printf "stdin closed\n" >.rb-lite/implementer-stdin
+'
+  write_fake "$repo" fake-reviewer 'printf "Clean review\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  printf "should not reach implementer\n" | run_rb_lite "$repo" run \
+    --task "stdin closed" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' >/tmp/rb-lite-test.out
+
+  assert_file_contains "$repo/.rb-lite/implementer-stdin" 'stdin closed'
 }
 
 test_progress_log_mirrors_to_stderr() {
@@ -712,13 +757,16 @@ done
   run_rb_lite "$repo" run --task "claude preset task marker" --max-rounds 1 --max-iters 1 \
     --implementer claude >/tmp/rb-lite-test.out
 
-  assert_equals 6 "$(cat "$repo/.rb-lite/claude-argc")" "claude preset arg count"
+  assert_equals 9 "$(cat "$repo/.rb-lite/claude-argc")" "claude preset arg count"
   assert_equals -p "$(cat "$repo/.rb-lite/claude-arg1")" "claude prompt flag"
   assert_file_contains "$repo/.rb-lite/claude-arg2" 'claude preset task marker'
   assert_equals --permission-mode "$(cat "$repo/.rb-lite/claude-arg3")" "claude permission flag"
   assert_equals acceptEdits "$(cat "$repo/.rb-lite/claude-arg4")" "claude permission mode"
-  assert_equals --allowedTools "$(cat "$repo/.rb-lite/claude-arg5")" "claude allowed-tools flag"
-  assert_file_contains "$repo/.rb-lite/claude-arg6" 'Bash,Edit,Write,Read,Glob,Grep'
+  assert_equals --output-format "$(cat "$repo/.rb-lite/claude-arg5")" "claude output-format flag"
+  assert_equals stream-json "$(cat "$repo/.rb-lite/claude-arg6")" "claude output format"
+  assert_equals --verbose "$(cat "$repo/.rb-lite/claude-arg7")" "claude verbose flag"
+  assert_equals --allowedTools "$(cat "$repo/.rb-lite/claude-arg8")" "claude allowed-tools flag"
+  assert_file_contains "$repo/.rb-lite/claude-arg9" 'Bash,Edit,Write,Read,Glob,Grep'
   if grep -q -- '--dangerously-skip-permissions' "$repo"/.rb-lite/claude-arg*; then
     fail "claude preset must not use --dangerously-skip-permissions"
   fi
@@ -1293,6 +1341,7 @@ test_default_reviewer_panel_runs_codex_claude_and_gemini() {
   repo=$(new_repo)
   run_dir="$repo/.rb-lite/default-panel"
   write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
   write_fake "$repo" codex '
 case "${1:-}" in
   review)
@@ -1307,7 +1356,7 @@ esac
   write_fake "$repo" claude '
 mkdir -p .rb-lite
 printf "%s\n" "$*" >.rb-lite/claude-args
-printf "claude says clean\n"
+printf "{\"result\":\"claude says clean from json\"}\n"
 '
   write_fake "$repo" npx '
 mkdir -p .rb-lite
@@ -1345,13 +1394,17 @@ printf "gemini says clean\n"
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
 
   assert_file_contains "$run_dir/review-round-1-1.md" 'codex says clean'
-  assert_file_contains "$run_dir/review-round-1-2.md" 'claude says clean'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'claude says clean from json'
   assert_file_contains "$run_dir/review-round-1-3.md" 'gemini says clean'
   assert_file_contains "$repo/.rb-lite/claude-args" 'permission-mode acceptEdits'
+  assert_file_contains "$repo/.rb-lite/claude-args" 'output-format json'
   assert_file_contains "$repo/.rb-lite/claude-args" 'allowedTools'
   assert_file_contains "$repo/.rb-lite/claude-args" 'Bash,Edit,Write,Read,Glob,Grep'
   if grep -q 'dangerously-skip-permissions' "$repo/.rb-lite/claude-args"; then
     fail "default claude reviewer must not use --dangerously-skip-permissions"
+  fi
+  if grep -q '{"result"' "$run_dir/review-round-1-2.md"; then
+    fail "default claude reviewer should write extracted .result text, not raw JSON"
   fi
   assert_file_contains "$repo/.rb-lite/claude-args" 'base ref '
   assert_equals 8 "$(cat "$repo/.rb-lite/npx-argc")" "default npx arg count"
@@ -1369,6 +1422,28 @@ printf "gemini says clean\n"
   assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.git/ralph-burning-live/'
   assert_file_contains "$repo/.rb-lite/gemini-prompt" 'No findings\.'
   assert_file_contains "$repo/.rb-lite/gemini-prompt" 'Do not modify any files'
+}
+
+test_default_claude_reviewer_is_error_is_operational_failure() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/default-claude-error"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "codex unavailable\n" >&2; exit 2'
+  write_fake "$repo" claude 'printf "{\"is_error\":true,\"result\":\"claude reviewer hit max turns\"}\n"'
+  write_fake "$repo" npx 'printf "gemini unavailable\n" >&2; exit 3'
+
+  status=0
+  run_rb_lite "$repo" run --task "default claude reviewer error" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err \
+    || status=$?
+
+  assert_equals 11 "$status" "all-failed reviewer panel exit"
+  assert_file_contains "$run_dir/review-round-1-2.md" 'Reviewer 2 \(exit 5'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'claude reviewer hit max turns'
+  assert_file_contains "$run_dir/log.txt" 'review panel failed: 0 of 3 reviewers succeeded'
+  assert_last_stdout_summary /tmp/rb-lite-test.out review_panel_failed 11
 }
 
 test_gemini_policy_file_written_to_run_dir() {
@@ -1392,6 +1467,7 @@ test_default_gemini_reviewer_refuses_repo_local_package() {
   run_dir="$repo/.rb-lite/local-gemini"
   mkdir -p "$repo/node_modules/@google/gemini-cli"
   write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
   write_fake "$repo" codex '
 case "${1:-}" in
   review)
@@ -1403,7 +1479,7 @@ case "${1:-}" in
     ;;
 esac
 '
-  write_fake "$repo" claude 'printf "claude says clean\n"'
+  write_fake "$repo" claude 'printf "{\"result\":\"claude says clean\"}\n"'
   write_fake "$repo" npx '
 mkdir -p .rb-lite
 printf "npx should not run when repo-local Gemini exists\n" >.rb-lite/npx-ran
@@ -1599,6 +1675,7 @@ mkdir -p "$TMP_ROOT"
 require_timeout_with_kill_after
 
 test_implementer_stops_when_stable
+test_implementer_stdin_is_closed
 test_progress_log_mirrors_to_stderr
 test_p1_review_triggers_remediation_round
 test_persistent_noop_implementer_consensus_failure_after_default_threshold
@@ -1646,6 +1723,7 @@ test_rb_lite_artifacts_do_not_affect_stability
 test_custom_run_dir_does_not_affect_stability
 test_reviewer_config_writes_per_reviewer_files
 test_default_reviewer_panel_runs_codex_claude_and_gemini
+test_default_claude_reviewer_is_error_is_operational_failure
 test_gemini_policy_file_written_to_run_dir
 test_default_gemini_reviewer_refuses_repo_local_package
 test_reviewer_exit_two_is_operational_failure
