@@ -50,7 +50,9 @@ Options:
                           binary on PATH that supports --kill-after (GNU
                           coreutils or uutils). Default:
                           RB_LITE_REVIEWER_TIMEOUT or 1800 (30 minutes).
-  --implementer NAME      Implementer preset to use. One of claude, codex.
+  --implementer NAME[,NAME...]
+                          Implementer preset to use, or comma-separated preset
+                          cycle. Each name must be one of claude, codex.
                           Default: RB_LITE_IMPLEMENTER. There is no built-in
                           default; an implementer or implement-cmd is required.
   --implement-cmd CMD     Raw implementer shell command escape hatch. Takes
@@ -75,7 +77,8 @@ Environment:
   RB_LITE_REVIEWER_TIMEOUT
                           Default reviewer command timeout in seconds; empty
                           disables reviewer timeouts.
-  RB_LITE_IMPLEMENTER     Default implementer preset. One of claude, codex.
+  RB_LITE_IMPLEMENTER     Default implementer preset or comma-separated preset
+                          cycle. Each name must be one of claude, codex.
   RB_LITE_IMPLEMENT_CMD   Shell command run for each implementer iteration.
   RB_LITE_PREV_SESSION    Exported to the implementer with the prior same-round session ID.
   RB_LITE_SESSION_REGEX   Bash ERE for session IDs in implementer stderr; empty disables capture.
@@ -85,15 +88,18 @@ Environment:
   RB_LITE_RUN_DIR         Explicit run artifact directory.
 
 There is no default implementer. Pass --implementer claude|codex,
---implement-cmd, or the matching RB_LITE_IMPLEMENTER/RB_LITE_IMPLEMENT_CMD env
-var. The codex preset starts with codex exec using noninteractive flags, then
-uses codex exec resume with the same flags on later iterations in the same
-round after capturing a session ID from stderr. The claude preset uses
---output-format stream-json --verbose; rb-lite does not parse implementer
-stdout. Override RB_LITE_SESSION_REGEX to support non-codex session ID formats,
-or set it empty to disable capture. The first capture group is used, or the full
-match when no group is present; no match or an empty capture leaves
-RB_LITE_PREV_SESSION empty.
+--implementer claude,codex, --implement-cmd, or the matching
+RB_LITE_IMPLEMENTER/RB_LITE_IMPLEMENT_CMD env var. A comma-separated
+implementer list cycles by review round: round 1 uses the first preset, and
+after each review round with actionable findings the next round advances to the
+next preset, wrapping at the end. The codex preset starts with codex exec using
+noninteractive flags, then uses codex exec resume with the same flags on later
+iterations in the same round after capturing a session ID from stderr. The
+claude preset uses --output-format stream-json --verbose; rb-lite does not
+parse implementer stdout. Override RB_LITE_SESSION_REGEX to support non-codex
+session ID formats, or set it empty to disable capture. The first capture group
+is used, or the full match when no group is present; no match or an empty
+capture leaves RB_LITE_PREV_SESSION empty.
 
 By default, only P0/P1/P2 reviewer findings trigger another implementer round;
 this is a deliberate behavior change, so P3-only output is considered clean.
@@ -157,21 +163,45 @@ die() {
   die_with "$EXIT_USAGE" "$@"
 }
 
-set_implement_cmd_from_preset() {
+implement_cmd_for_preset() {
   local name=$1
-  local source=$2
 
   case $name in
     claude)
-      implement_cmd='claude -p "$PROMPT" --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"'
+      printf '%s\n' 'claude -p "$PROMPT" --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"'
       ;;
     codex)
-      implement_cmd='if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'
+      printf '%s\n' 'if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'
       ;;
     *)
-      die "$source must be one of claude, codex"
+      return 1
       ;;
   esac
+}
+
+parse_implementer_preset_list() {
+  local value=$1
+  local rest part
+
+  if [[ -z $value || $value == ,* || $value == *, || $value == *,,* ]]; then
+    return 1
+  fi
+
+  rest=$value
+  while :; do
+    part=${rest%%,*}
+    case $part in
+      claude|codex)
+        printf '%s ' "$part"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+
+    [[ $rest == *,* ]] || break
+    rest=${rest#*,}
+  done
 }
 
 log_msg() {
@@ -577,6 +607,9 @@ run_command() {
   local reviewer_timeout=${RB_LITE_REVIEWER_TIMEOUT-1800}
   local implement_cmd=
   local implementer=
+  local implementer_source=
+  local current_implementer_preset=
+  local implementer_preset_words=
   local reviewers_file=${RB_LITE_REVIEWERS_FILE:-.rb-lite-reviewers}
   local min_findings_severity=${RB_LITE_MIN_FINDINGS_SEVERITY:-P2}
   local findings_severity_pattern=
@@ -595,6 +628,8 @@ run_command() {
   local implement_cmd_set=0
   local implementer_set=0
   local root round round_before round_after noop_round_streak
+  local implementer_preset_count=0
+  local -a implementer_presets=()
   local -a review_paths=()
 
   while (($#)); do
@@ -700,14 +735,23 @@ run_command() {
     [[ -n $implement_cmd ]] \
       || die "--implement-cmd was set to an empty command"
   elif (( implementer_set )); then
-    set_implement_cmd_from_preset "$implementer" "--implementer"
+    implementer_source=--implementer
+    if ! implementer_preset_words=$(parse_implementer_preset_list "$implementer"); then
+      die "$implementer_source must be one of claude, codex, or a comma-separated list of those names with no empty elements"
+    fi
+    read -r -a implementer_presets <<<"$implementer_preset_words"
   elif [[ -n ${RB_LITE_IMPLEMENT_CMD:-} ]]; then
     implement_cmd=$RB_LITE_IMPLEMENT_CMD
   elif [[ -n ${RB_LITE_IMPLEMENTER:-} ]]; then
-    set_implement_cmd_from_preset "$RB_LITE_IMPLEMENTER" "RB_LITE_IMPLEMENTER"
+    implementer_source=RB_LITE_IMPLEMENTER
+    if ! implementer_preset_words=$(parse_implementer_preset_list "$RB_LITE_IMPLEMENTER"); then
+      die "$implementer_source must be one of claude, codex, or a comma-separated list of those names with no empty elements"
+    fi
+    read -r -a implementer_presets <<<"$implementer_preset_words"
   else
     die "an implementer is required: pass --implementer claude|codex or --implement-cmd"
   fi
+  implementer_preset_count=${#implementer_presets[@]}
   SUMMARY_MAX_ROUNDS=$max_rounds
   SUMMARY_MAX_ITERS=$max_iters
   SUMMARY_MAX_NOOP_ROUNDS=$max_noop_rounds
@@ -767,6 +811,15 @@ EOF
   round=1
   noop_round_streak=0
   while (( round <= max_rounds )); do
+    if (( implementer_preset_count > 0 )); then
+      current_implementer_preset=${implementer_presets[$(((round - 1) % implementer_preset_count))]}
+      if ! implement_cmd=$(implement_cmd_for_preset "$current_implementer_preset"); then
+        die_with "$EXIT_INTERNAL" "$implementer_source preset parser accepted invalid name: $current_implementer_preset"
+      fi
+      if (( implementer_preset_count > 1 )); then
+        log_msg "round $round implementer preset: $current_implementer_preset"
+      fi
+    fi
     round_before=$(fingerprint_git_state "$root")
     if ! run_implementer_loop "$root" "$round" "$max_iters" "$implement_timeout" "$implement_cmd" "$task" "${review_paths[@]}"; then
       die_with "$EXIT_IMPLEMENTER" "implementer loop failed; see $RUN_DIR"

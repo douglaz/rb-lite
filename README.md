@@ -3,12 +3,12 @@
 [![CI](https://github.com/douglaz/rb-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/douglaz/rb-lite/actions/workflows/ci.yml)
 
 A small Bash CLI that drives an **implement → review** loop using an explicit
-`claude` or `codex` implementer preset (or a custom command) and codex,
-[`claude`](https://docs.anthropic.com/claude/docs/claude-code), and Gemini CLI
-as the default reviewer panel. Repeatedly invokes the implementer until the
-git diff stabilizes, runs the reviewer panel in parallel, feeds P0/P1/P2
-findings back into the implementer, and stops when the panel is clean, the
-implementer refuses to act on remaining findings, or a budget cap is hit.
+`claude`/`codex` implementer preset, a preset cycle, or a custom command. It
+uses codex, [`claude`](https://docs.anthropic.com/claude/docs/claude-code), and
+Gemini CLI as the default reviewer panel. Repeatedly invokes the implementer
+until the git diff stabilizes, runs the reviewer panel in parallel, feeds
+P0/P1/P2 findings back into the implementer, and stops when the panel is clean,
+the implementer refuses to act on remaining findings, or a budget cap is hit.
 
 Entirely in shell, no daemons, no state DB, runs in any git repo.
 
@@ -27,7 +27,8 @@ nix run github:douglaz/rb-lite -- run \
 
 That single command:
 1. Builds rb-lite from source (cached after first run)
-2. Spawns the selected implementer preset in your repo's working tree
+2. Spawns the selected implementer preset or preset cycle in your repo's
+   working tree
 3. Loops implementer ↔ panel-reviewer (codex + claude, plus Gemini when available)
 4. Stops when the panel reports no actionable findings, exits clean
 
@@ -57,15 +58,17 @@ and (B) wrap those dependencies via Nix automatically.
 ## Prerequisites
 
 - A git repository (rb-lite refuses to run outside one).
-- An explicit implementer: `--implementer codex`, `--implementer claude`, or
-  `--implement-cmd '...'`. There is no default implementer.
-- `codex` CLI on `PATH`, authenticated, if you use `--implementer codex` or
-  the default reviewer panel. The codex preset runs
+- An explicit implementer: `--implementer codex`, `--implementer claude`,
+  `--implementer claude,codex`, or `--implement-cmd '...'`. There is no
+  default implementer.
+- `codex` CLI on `PATH`, authenticated, if your implementer preset/cycle
+  includes `codex` or you use the default reviewer panel. The codex preset runs
   `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"`,
   reusing the same session within a round when possible. The default reviewer
   panel includes `codex review`.
-- `claude` CLI on `PATH`, authenticated, if you use `--implementer claude` or
-  the default reviewer panel. The claude implementer preset uses `claude -p`
+- `claude` CLI on `PATH`, authenticated, if your implementer preset/cycle
+  includes `claude` or you use the default reviewer panel. The claude
+  implementer preset uses `claude -p`
   with `--permission-mode acceptEdits --output-format stream-json --verbose`
   and a broad allowed-tools list (matches the sister `ralph-burning` project).
 - `jq` on `PATH` if you use the default reviewer panel from a source checkout
@@ -103,7 +106,7 @@ You can override or replace either side — see "Configuration" below.
                                              │
                  ┌───────────────────────────▼───────────────────────┐
                  │ Implementer iteration loop                        │
-                 │  • selected preset or --implement-cmd             │
+                 │  • selected preset/cycle or --implement-cmd       │
                  │  • repeat until git state stops changing          │
                  └───────────────────────────┬───────────────────────┘
                                              │
@@ -147,7 +150,7 @@ Common flags (full list: `rb-lite --help`):
 | `--min-findings-severity LEVEL` | `P2` | Lowest severity that triggers another round (`P0`/`P1`/`P2`/`P3`) |
 | `--implement-timeout SECS` | 14400 | SIGTERM/SIGKILL each implementer iteration if it runs longer |
 | `--reviewer-timeout SECS` | 1800 | SIGTERM/SIGKILL each reviewer if it runs longer; empty disables |
-| `--implementer NAME` | none | Select an implementer preset (`claude` or `codex`); required unless `--implement-cmd` or env equivalent is set |
+| `--implementer NAME[,NAME...]` | none | Select an implementer preset (`claude` or `codex`) or comma-separated preset cycle; required unless `--implement-cmd` or env equivalent is set |
 | `--implement-cmd CMD` | none | Raw implementer subprocess escape hatch; takes precedence over presets |
 | `--reviewers-file PATH` | `.rb-lite-reviewers` | Custom reviewer panel (one shell command per line) |
 | `--branch NAME` | none | `git switch -c NAME` before starting |
@@ -213,13 +216,18 @@ as at least one reviewer succeeds.
 ```bash
 rb-lite run --implementer codex --task "..."
 rb-lite run --implementer claude --task "..."
+rb-lite run --implementer claude,codex --task "..."
 rb-lite run --implement-cmd 'my-implementer "$PROMPT"' --task "..."
 ```
 
 rb-lite has no default implementer. Choose `--implementer codex`,
-`--implementer claude`, set `RB_LITE_IMPLEMENTER`, or provide a raw command
-with `--implement-cmd` / `RB_LITE_IMPLEMENT_CMD`. Raw commands are used
-verbatim. Resolution order is `--implement-cmd`, `--implementer`,
+`--implementer claude`, a comma-separated cycle such as
+`--implementer claude,codex`, set `RB_LITE_IMPLEMENTER`, or provide a raw
+command with `--implement-cmd` / `RB_LITE_IMPLEMENT_CMD`. With a cycle, round 1
+uses the first preset; after each review round with actionable findings, the
+next round advances to the next preset and wraps at the end. The cycle order is
+exactly the order you wrote. Raw commands are used verbatim and never cycle.
+Resolution order is `--implement-cmd`, `--implementer`,
 `RB_LITE_IMPLEMENT_CMD`, then `RB_LITE_IMPLEMENTER`.
 
 The claude implementer preset runs:
@@ -278,7 +286,7 @@ the JSON on success; failure messages still go to stderr.
 - `RB_LITE_MAX_ITERS`
 - `RB_LITE_IMPLEMENT_TIMEOUT`
 - `RB_LITE_REVIEWER_TIMEOUT` (empty disables reviewer timeouts)
-- `RB_LITE_IMPLEMENTER`
+- `RB_LITE_IMPLEMENTER` (single preset or comma-separated preset cycle)
 - `RB_LITE_IMPLEMENT_CMD`
 - `RB_LITE_SESSION_REGEX`
 - `RB_LITE_REVIEWERS_FILE`
