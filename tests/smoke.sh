@@ -863,6 +863,104 @@ done
   assert_file_contains "$repo/.rb-lite/env-codex-arg4" 'env codex preset'
 }
 
+test_implementer_preset_cycle_advances_after_review_findings() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/preset-cycle"
+  write_fake "$repo" claude '
+mkdir -p .rb-lite
+printf "claude:%s:%s\n" "$ROUND" "$ITERATION" >>.rb-lite/preset-cycle.log
+if [[ $ITERATION == 1 ]]; then
+  printf "claude round %s\n" "$ROUND" >"round-${ROUND}-implementer.txt"
+fi
+'
+  write_fake "$repo" codex '
+mkdir -p .rb-lite
+printf "codex:%s:%s\n" "$ROUND" "$ITERATION" >>.rb-lite/preset-cycle.log
+if [[ $ITERATION == 1 ]]; then
+  printf "codex round %s\n" "$ROUND" >"round-${ROUND}-implementer.txt"
+fi
+'
+  write_fake "$repo" fake-reviewer '
+if (( ROUND < 3 )); then
+  printf "P1: force another implementer round %s\n" "$ROUND"
+else
+  printf "No findings.\n"
+fi
+'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "cycle presets" --max-rounds 3 --max-iters 2 \
+    --implementer claude,codex --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 3 round'
+  assert_last_stdout_summary /tmp/rb-lite-test.out clean 0
+  assert_file_contains "$repo/.rb-lite/preset-cycle.log" '^claude:1:1$'
+  assert_file_contains "$repo/.rb-lite/preset-cycle.log" '^codex:2:1$'
+  assert_file_contains "$repo/.rb-lite/preset-cycle.log" '^claude:3:1$'
+  assert_file_contains "$run_dir/log.txt" 'round 1 implementer preset: claude'
+  assert_file_contains "$run_dir/log.txt" 'round 2 implementer preset: codex'
+  assert_file_contains "$run_dir/log.txt" 'round 3 implementer preset: claude'
+  if grep -Eq '^codex:1:|^claude:2:|^codex:3:' "$repo/.rb-lite/preset-cycle.log"; then
+    fail "implementer preset cycle used the wrong preset for a round"
+  fi
+}
+
+test_env_implementer_cycle_selects_first_preset() {
+  local repo
+  repo=$(new_repo)
+  write_fake "$repo" codex '
+mkdir -p .rb-lite
+printf "codex round %s\n" "$ROUND" >.rb-lite/env-cycle-codex-round
+'
+  write_fake "$repo" claude '
+mkdir -p .rb-lite
+printf "claude should not run\n" >.rb-lite/env-cycle-claude-ran
+exit 91
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings.\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  (
+    cd "$repo"
+    unset RB_LITE_IMPLEMENT_CMD
+    PATH="$repo/fakes:$PATH" RB_LITE_IMPLEMENTER=codex,claude "$repo/bin/rb-lite" run \
+      --task "env cycle" --max-rounds 1 --max-iters 1
+  ) >/tmp/rb-lite-test.out
+
+  assert_file_contains "$repo/.rb-lite/env-cycle-codex-round" '^codex round 1$'
+  [[ ! -e $repo/.rb-lite/env-cycle-claude-ran ]] || fail "env cycle should select codex for round 1"
+}
+
+test_invalid_implementer_lists_are_usage_errors() {
+  local repo status value
+  repo=$(new_repo)
+
+  for value in "claude,,codex" "claude,bogus"; do
+    status=0
+    run_rb_lite "$repo" run --task "invalid implementer list" --implementer "$value" \
+      >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+    assert_equals 2 "$status" "invalid implementer list '$value' exit"
+    assert_file_contains /tmp/rb-lite-test.err 'implementer must be one of claude, codex'
+    assert_last_stdout_summary /tmp/rb-lite-test.out usage_error 2
+  done
+
+  for value in "claude,,codex" "claude,bogus"; do
+    status=0
+    (
+      cd "$repo"
+      unset RB_LITE_IMPLEMENT_CMD
+      PATH="$repo/fakes:$PATH" RB_LITE_IMPLEMENTER=$value "$repo/bin/rb-lite" run \
+        --task "invalid env implementer list"
+    ) >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+    assert_equals 2 "$status" "invalid env implementer list '$value' exit"
+    assert_file_contains /tmp/rb-lite-test.err 'RB_LITE_IMPLEMENTER must be one of claude, codex'
+    assert_last_stdout_summary /tmp/rb-lite-test.out usage_error 2
+  done
+}
+
 test_cli_implement_cmd_takes_precedence_over_implementer() {
   local repo
   repo=$(new_repo)
@@ -1702,6 +1800,9 @@ test_empty_cli_implement_cmd_is_usage_error_with_summary
 test_invalid_implementer_is_usage_error
 test_invalid_env_implementer_is_usage_error
 test_env_implementer_codex_selects_codex_preset
+test_implementer_preset_cycle_advances_after_review_findings
+test_env_implementer_cycle_selects_first_preset
+test_invalid_implementer_lists_are_usage_errors
 test_cli_implement_cmd_takes_precedence_over_implementer
 test_env_implement_cmd_takes_precedence_over_env_implementer
 test_implementer_session_resume_resets_at_round_boundary
