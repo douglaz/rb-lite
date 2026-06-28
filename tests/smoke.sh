@@ -27,6 +27,13 @@ assert_file_contains() {
   grep -Eq "$pattern" "$file" || fail "expected $file to match $pattern"
 }
 
+assert_file_not_contains() {
+  local file=$1
+  local pattern=$2
+  [[ -f $file ]] || fail "missing file: $file"
+  ! grep -Eq "$pattern" "$file" || fail "expected $file not to match $pattern"
+}
+
 assert_last_stdout_summary() {
   local file=$1
   local status=$2
@@ -1838,6 +1845,112 @@ exit 1
   assert_last_stdout_summary /tmp/rb-lite-test.out implementer_failed 10
 }
 
+test_application_json_status_failure_does_not_retry() {
+  local repo run_dir status out err
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/app-json-status-run"
+  out=$(mktemp "$TMP_ROOT/rb-lite-test.out.XXXXXX")
+  err=$(mktemp "$TMP_ROOT/rb-lite-test.err.XXXXXX")
+  # A real implementer failure may print application/test JSON. A generic
+  # {"status":500} payload is not enough evidence of a provider outage.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+printf "%s\n" "{\"status\":500,\"message\":\"unit test failed\"}" >&2
+exit 1
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=0 RB_LITE_API_MAX_RETRIES=2 "$repo/bin/rb-lite" run \
+      --task "application json failure" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >"$out" 2>"$err"
+  ) || status=$?
+
+  assert_equals 10 "$status" "application JSON status should not be treated as a provider transient"
+  assert_equals 1 "$(cat "$repo/.rb-lite/impl-attempts")" "application JSON status failure must not be retried"
+  assert_file_contains "$run_dir/log.txt" 'failed with exit 1'
+  assert_last_stdout_summary "$out" implementer_failed 10
+}
+
+test_application_api_error_522_line_does_not_retry() {
+  local repo run_dir status out err
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/app-api-error-522-run"
+  out=$(mktemp "$TMP_ROOT/rb-lite-test.out.XXXXXX")
+  err=$(mktemp "$TMP_ROOT/rb-lite-test.err.XXXXXX")
+  # Application/test output may contain an "API error" line number. A bare 522
+  # there is not enough evidence of an HTTP 522 or Cloudflare provider timeout.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+printf "API error line 522: validation failed\n" >&2
+exit 1
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=0 RB_LITE_API_MAX_RETRIES=2 "$repo/bin/rb-lite" run \
+      --task "application api error line" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >"$out" 2>"$err"
+  ) || status=$?
+
+  assert_equals 10 "$status" "application API error line 522 should not be treated as a provider transient"
+  assert_equals 1 "$(cat "$repo/.rb-lite/impl-attempts")" "application API error line 522 must not be retried"
+  assert_file_contains "$run_dir/log.txt" 'failed with exit 1'
+  assert_last_stdout_summary "$out" implementer_failed 10
+}
+
+test_application_connection_timeout_failure_does_not_retry() {
+  local repo run_dir status out err
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/app-connection-timeout-run"
+  out=$(mktemp "$TMP_ROOT/rb-lite-test.out.XXXXXX")
+  err=$(mktemp "$TMP_ROOT/rb-lite-test.err.XXXXXX")
+  # A local app/database connection timeout is a real implementer failure, even
+  # when the app logs it as {"error":"connection_timeout"}.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+printf "database connection timeout\n" >&2
+printf "%s\n" "{\"error\":\"connection_timeout\"}" >&2
+exit 1
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=0 RB_LITE_API_MAX_RETRIES=2 "$repo/bin/rb-lite" run \
+      --task "application connection timeout" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >"$out" 2>"$err"
+  ) || status=$?
+
+  assert_equals 10 "$status" "application connection timeout should not be treated as a provider transient"
+  assert_equals 1 "$(cat "$repo/.rb-lite/impl-attempts")" "application connection timeout failure must not be retried"
+  assert_file_contains "$run_dir/log.txt" 'failed with exit 1'
+  assert_last_stdout_summary "$out" implementer_failed 10
+}
+
 test_transient_retries_are_bounded() {
   local repo run_dir status
   repo=$(new_repo)
@@ -1904,6 +2017,99 @@ printf "ok\n"
   assert_equals 2 "$(cat "$repo/.rb-lite/impl-attempts")" "bare HTTP 5xx retried once"
   assert_file_contains "$run_dir/log.txt" 'transient API error'
   assert_last_stdout_summary /tmp/rb-lite-test.out clean 0
+}
+
+test_implementer_retries_cloudflare_522_and_honors_retry_after() {
+  local repo run_dir status out expected_delays
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/cloudflare-522-run"
+  out=$(mktemp "$TMP_ROOT/rb-lite-test.out.XXXXXX")
+  # Anthropic may surface Cloudflare 522 origin timeouts as structured JSON with
+  # retryable=true and retry_after=120. rb-lite should treat the Cloudflare 522
+  # payload as transient and use retry_after/retry-after as the backoff floor.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "%s\n" "{\"status\":522,\"retryable\":true,\"retry_after\":120,\"cloudflare_error\":true}" >&2
+  exit 1
+fi
+if (( count == 2 )); then
+  printf "%s\n" "{\"cloudflare_error\":true,\"error_code\":522,\"retryable\":true,\"retry-after\":121}" >&2
+  exit 1
+fi
+printf "ok\n"
+'
+  write_fake "$repo" sleep '
+mkdir -p .rb-lite
+printf "%s\n" "$*" >>.rb-lite/slept-delays
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=0 "$repo/bin/rb-lite" run \
+      --task "cloudflare 522 retry" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >"$out"
+  ) || status=$?
+
+  assert_equals 0 "$status" "Cloudflare 522 should be retried into a clean run"
+  assert_equals 3 "$(cat "$repo/.rb-lite/impl-attempts")" "Cloudflare 522 retried until the provider recovered"
+  expected_delays=$'120\n121'
+  assert_equals "$expected_delays" "$(cat "$repo/.rb-lite/slept-delays")" "provider retry_after should be used as the retry delay floor"
+  assert_file_contains "$run_dir/log.txt" 'transient API error'
+  assert_file_contains "$run_dir/log.txt" 'provider retry_after 120s'
+  assert_file_contains "$run_dir/log.txt" 'provider retry_after 121s'
+  assert_last_stdout_summary "$out" clean 0
+}
+
+test_unrelated_stdout_retry_after_is_ignored() {
+  local repo run_dir status out expected_delays
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/unrelated-stdout-retry-after-run"
+  out=$(mktemp "$TMP_ROOT/rb-lite-test.out.XXXXXX")
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "%s\n" "{\"fixture\":true,\"retry_after\":999,\"message\":\"connection refused\"}"
+  printf "Error: 429 Too Many Requests - rate limit exceeded\n" >&2
+  exit 1
+fi
+printf "ok\n"
+'
+  write_fake "$repo" sleep '
+mkdir -p .rb-lite
+printf "%s\n" "$*" >>.rb-lite/slept-delays
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=7 RB_LITE_API_MAX_RETRIES=1 "$repo/bin/rb-lite" run \
+      --task "unrelated stdout retry after" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >"$out"
+  ) || status=$?
+
+  expected_delays='7'
+  assert_equals 0 "$status" "transient stderr failure should retry into a clean run"
+  assert_equals 2 "$(cat "$repo/.rb-lite/impl-attempts")" "transient stderr failure retried once"
+  assert_equals "$expected_delays" "$(cat "$repo/.rb-lite/slept-delays")" "stdout fixture retry_after must not override provider backoff"
+  assert_file_contains "$run_dir/log.txt" 'retry 1/1 in 7s'
+  assert_file_not_contains "$run_dir/log.txt" 'provider retry_after 999s'
+  assert_last_stdout_summary "$out" clean 0
 }
 
 test_sigkilled_implementer_is_not_retried() {
@@ -1980,8 +2186,13 @@ test_implementer_stdin_is_closed
 test_progress_log_mirrors_to_stderr
 test_implementer_retries_transient_api_error
 test_non_transient_failure_does_not_retry
+test_application_json_status_failure_does_not_retry
+test_application_api_error_522_line_does_not_retry
+test_application_connection_timeout_failure_does_not_retry
 test_transient_retries_are_bounded
 test_implementer_retries_bare_http_status_error
+test_implementer_retries_cloudflare_522_and_honors_retry_after
+test_unrelated_stdout_retry_after_is_ignored
 test_sigkilled_implementer_is_not_retried
 test_exit_124_is_not_retried_without_timeout
 test_p1_review_triggers_remediation_round
