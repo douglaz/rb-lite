@@ -1769,12 +1769,221 @@ printf "%s\n" "$count" >"$count_file"
   assert_file_contains "$run_dir/log.txt" 'partial failures: 1 of 2 reviewers succeeded'
 }
 
+test_implementer_retries_transient_api_error() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/transient-run"
+  # First attempt fails with a provider rate-limit error; the retry succeeds with
+  # no change, so the iteration stabilizes. Two invocations: 1 failed + 1 retry.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "API Error: Server is temporarily limiting requests (not your usage limit) Rate limited\n"
+  exit 1
+fi
+printf "ok\n"
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=0 "$repo/bin/rb-lite" run \
+      --task "transient retry" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+  ) || status=$?
+
+  assert_equals 0 "$status" "transient error should be retried into a clean run"
+  assert_equals 2 "$(cat "$repo/.rb-lite/impl-attempts")" "implementer retried once after the transient error"
+  assert_file_contains "$run_dir/log.txt" 'transient API error'
+  assert_file_contains "$run_dir/log.txt" 'retry 1/'
+  assert_last_stdout_summary /tmp/rb-lite-test.out clean 0
+}
+
+test_non_transient_failure_does_not_retry() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/real-fail-run"
+  # A genuine implementer failure (no rate-limit signature) must fail fast, not retry.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+printf "error: the build failed: missing semicolon\n" >&2
+exit 1
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=0 "$repo/bin/rb-lite" run \
+      --task "real failure" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err
+  ) || status=$?
+
+  assert_equals 10 "$status" "a non-transient failure must fail the round"
+  assert_equals 1 "$(cat "$repo/.rb-lite/impl-attempts")" "a non-transient failure must not be retried"
+  assert_file_contains "$run_dir/log.txt" 'failed with exit 1'
+  assert_last_stdout_summary /tmp/rb-lite-test.out implementer_failed 10
+}
+
+test_transient_retries_are_bounded() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/bounded-run"
+  # Always transient: the run gives up after RB_LITE_API_MAX_RETRIES retries.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+printf "Error: 429 Too Many Requests - rate limit exceeded\n" >&2
+exit 1
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=0 RB_LITE_API_MAX_RETRIES=2 "$repo/bin/rb-lite" run \
+      --task "bounded retries" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err
+  ) || status=$?
+
+  assert_equals 10 "$status" "exhausted transient retries must fail the round"
+  assert_equals 3 "$(cat "$repo/.rb-lite/impl-attempts")" "1 initial attempt plus 2 bounded retries"
+  assert_file_contains "$run_dir/log.txt" 'retry 2/2'
+  assert_last_stdout_summary /tmp/rb-lite-test.out implementer_failed 10
+}
+
+test_implementer_retries_bare_http_status_error() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/bare-http-run"
+  # A bare numeric HTTP status with no named phrase (e.g. "HTTP 500 Internal
+  # Server Error") is still a retryable transient error.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+if (( count == 1 )); then
+  printf "Request failed: HTTP 500 Internal Server Error\n" >&2
+  exit 1
+fi
+printf "ok\n"
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=0 "$repo/bin/rb-lite" run \
+      --task "bare http status" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+  ) || status=$?
+
+  assert_equals 0 "$status" "a bare HTTP 5xx should be retried into a clean run"
+  assert_equals 2 "$(cat "$repo/.rb-lite/impl-attempts")" "bare HTTP 5xx retried once"
+  assert_file_contains "$run_dir/log.txt" 'transient API error'
+  assert_last_stdout_summary /tmp/rb-lite-test.out clean 0
+}
+
+test_sigkilled_implementer_is_not_retried() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/sigkill-run"
+  # A SIGKILL (exit 137, e.g. timeout --kill-after) is a hang/kill, not a
+  # transient API error — it must not be retried even if its output happened to
+  # contain a transient marker.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+printf "connection timed out\n" >&2
+exit 137
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=0 "$repo/bin/rb-lite" run \
+      --task "sigkill" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err
+  ) || status=$?
+
+  assert_equals 10 "$status" "a SIGKILLed implementer must fail the round"
+  assert_equals 1 "$(cat "$repo/.rb-lite/impl-attempts")" "a SIGKILLed (137) implementer must not be retried"
+  assert_last_stdout_summary /tmp/rb-lite-test.out implementer_failed 10
+}
+
+test_exit_124_is_not_retried_without_timeout() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/exit124-run"
+  # Exit 124 is the timeout convention regardless of whether rb-lite set a
+  # timeout — it must not be retried even with no --implement-timeout and a
+  # transient marker in the output.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+count_file=.rb-lite/impl-attempts
+count=0
+[[ -f $count_file ]] && count=$(cat "$count_file")
+count=$((count + 1))
+printf "%s\n" "$count" >"$count_file"
+printf "connection timed out\n" >&2
+exit 124
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_API_RETRY_DELAYS=0 "$repo/bin/rb-lite" run \
+      --task "exit124" --max-rounds 1 --max-iters 3 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err
+  ) || status=$?
+
+  assert_equals 10 "$status" "an exit-124 implementer must fail the round"
+  assert_equals 1 "$(cat "$repo/.rb-lite/impl-attempts")" "exit 124 must not be retried even without --implement-timeout"
+  assert_last_stdout_summary /tmp/rb-lite-test.out implementer_failed 10
+}
+
 mkdir -p "$TMP_ROOT"
 require_timeout_with_kill_after
 
 test_implementer_stops_when_stable
 test_implementer_stdin_is_closed
 test_progress_log_mirrors_to_stderr
+test_implementer_retries_transient_api_error
+test_non_transient_failure_does_not_retry
+test_transient_retries_are_bounded
+test_implementer_retries_bare_http_status_error
+test_sigkilled_implementer_is_not_retried
+test_exit_124_is_not_retried_without_timeout
 test_p1_review_triggers_remediation_round
 test_persistent_noop_implementer_consensus_failure_after_default_threshold
 test_max_rounds_hit_exits_12

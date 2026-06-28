@@ -260,7 +260,7 @@ legacy `REVIEW_FILE` (singular, combined-doc) env var was removed.
 | `0`  | `clean` | Review panel reported no findings at or above severity floor |
 | `2`  | `usage_error` | CLI parsing failure, invalid value, conflicting flags |
 | `3`  | `env_error` | Not in git repo, missing tool, run-dir setup failure |
-| `10` | `implementer_failed` | Implementer subprocess non-zero (incl. timeout 124/137) or max-iters without stabilizing |
+| `10` | `implementer_failed` | Implementer subprocess non-zero (incl. timeout 124/137) or max-iters without stabilizing. Transient provider errors (rate limit / overloaded / 5xx / network) are retried with backoff first — see `RB_LITE_API_RETRY_DELAYS` / `RB_LITE_API_MAX_RETRIES` |
 | `11` | `review_panel_failed` | Zero reviewers exited 0 |
 | `12` | `max_rounds_hit` | Hit `--max-rounds` before convergence |
 | `13` | `consensus_failure` | Hit `--max-noop-rounds` consecutive no-op rounds with reviewers still finding things |
@@ -292,6 +292,25 @@ the JSON on success; failure messages still go to stderr.
 - `RB_LITE_REVIEWERS_FILE`
 - `RB_LITE_MIN_FINDINGS_SEVERITY`
 - `RB_LITE_RUN_DIR`
+- `RB_LITE_API_RETRY_DELAYS` (space-separated backoff seconds before retrying an implementer iteration that failed with a transient provider error; last value repeats; default `10 30 60`)
+- `RB_LITE_API_MAX_RETRIES` (max transient-error retries per implementer iteration; default `10`; `0` disables)
+
+## Transient implementer errors
+
+When an implementer iteration exits non-zero because of a **transient provider
+error** — an API rate limit (HTTP 429), an `overloaded`/529, a 5xx, or a network
+blip — rb-lite retries the *same* iteration with backoff instead of failing the
+round. These failures clear on their own, and a retry just re-runs the same
+prompt — exactly what the normal stabilization loop already does on every
+iteration — so retrying is almost always the right move. The default backoff is
+`10s, 30s, 60s, 60s, …` (the last `RB_LITE_API_RETRY_DELAYS` value repeats), up
+to `RB_LITE_API_MAX_RETRIES` (default 10) retries per iteration. A retry does not
+advance the iteration counter (`--max-iters`).
+
+Only genuine transient errors are retried. A timeout (124), a SIGKILL (137, e.g.
+`timeout --kill-after` escalating past a process that ignored SIGTERM), and any
+non-transient failure are hangs/kills or real failures, not provider blips, so
+they fail the round immediately.
 
 ## Development
 
