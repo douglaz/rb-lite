@@ -86,6 +86,14 @@ Environment:
   RB_LITE_MIN_FINDINGS_SEVERITY
                           Default minimum reviewer finding severity. Default: P2.
   RB_LITE_RUN_DIR         Explicit run artifact directory.
+  RB_LITE_API_RETRY_DELAYS
+                          Space-separated backoff, in seconds, before retrying an
+                          implementer iteration that failed with a TRANSIENT
+                          provider error (rate limit / overloaded / 5xx /
+                          network). The last value repeats. Default: "10 30 60".
+  RB_LITE_API_MAX_RETRIES Maximum transient-error retries for a single
+                          implementer iteration before the round fails. Default:
+                          10. Set to 0 to disable retrying.
 
 There is no default implementer. Pass --implementer claude|codex,
 --implementer claude,codex, --implement-cmd, or the matching
@@ -357,6 +365,46 @@ build_prompt() {
   fi
 }
 
+# Heuristic: did an implementer iteration fail because of a TRANSIENT provider
+# error (rate limit / overloaded / 5xx / network blip) rather than a real,
+# work-affecting failure? Inspects the captured stdout + stderr. A transient
+# error did no work (the git state is unchanged) and clears on its own, so the
+# same iteration is worth retrying with backoff; a genuine failure must still
+# fail the round fast. Deliberately broad enough to catch both the claude CLI's
+# structured `"api_error_status": 429` / `"error": "rate_limit"` and codex/other
+# providers' plain-text "rate limit" / "overloaded" / "Too Many Requests" / 5xx
+# / connection-error messages.
+implementer_failure_is_transient() {
+  local stdout=$1 stderr=$2
+  grep -qiE \
+    '"api_error_status"[[:space:]]*:[[:space:]]*(408|425|429|500|502|503|504|529)|"(error|type)"[[:space:]]*:[[:space:]]*"(rate_?limit(_error)?|overloaded(_error)?|api_error|server_error)"|rate[ _-]?limit|temporarily limiting requests|too many requests|overloaded|service unavailable|bad gateway|gateway time-?out|connection (error|reset|refused|closed|timed out)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|stream (disconnected|error)|(internal )?server (error|had an error)|http[ /]?(408|425|429|500|502|503|504|529)|status[ _-]?code[^[:digit:]]{0,4}(408|425|429|500|502|503|504|529)|\b529\b' \
+    -- "$stdout" "$stderr" 2>/dev/null
+}
+
+# Backoff, in seconds, before the Nth (0-based) transient-error retry. Read from
+# RB_LITE_API_RETRY_DELAYS (default "10 30 60"); the last entry repeats for all
+# later retries, so the steady state is the final value.
+implementer_retry_delay() {
+  local attempt=$1 token
+  local -a raw schedule
+  read -r -a raw <<<"${RB_LITE_API_RETRY_DELAYS-10 30 60}"
+  # Keep only non-negative integers — a non-numeric entry would otherwise reach
+  # `sleep "$delay"`, fail, and trip the `set -Eeuo pipefail` ERR trap. Fall back
+  # to the default schedule when nothing valid remains.
+  for token in "${raw[@]}"; do
+    if [[ $token =~ ^[0-9]+$ ]]; then
+      schedule+=("$token")
+    fi
+  done
+  if (( ${#schedule[@]} == 0 )); then
+    schedule=(10 30 60)
+  fi
+  if (( attempt >= ${#schedule[@]} )); then
+    attempt=$(( ${#schedule[@]} - 1 ))
+  fi
+  printf '%s' "${schedule[attempt]}"
+}
+
 run_implementer_loop() {
   local root=$1
   local round=$2
@@ -367,6 +415,7 @@ run_implementer_loop() {
   shift 6
   local -a review_paths=("$@")
   local iter before after prompt stdout stderr rc review_files_env prev_session session_regex line
+  local api_retries max_api_retries delay
   local -a implementer_argv
 
   if (( ${#review_paths[@]} > 0 )); then
@@ -385,6 +434,8 @@ run_implementer_loop() {
 
   prev_session=
   session_regex=${RB_LITE_SESSION_REGEX-'session id: ([[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12})'}
+  max_api_retries=${RB_LITE_API_MAX_RETRIES:-10}
+  [[ $max_api_retries =~ ^[0-9]+$ ]] || max_api_retries=10
   iter=1
   while (( iter <= max_iters )); do
     before=$(fingerprint_git_state "$root")
@@ -394,17 +445,44 @@ run_implementer_loop() {
     log_msg "round $round implementer iteration $iter starting"
     SUMMARY_IMPLEMENTER_ITERATIONS=$((SUMMARY_IMPLEMENTER_ITERATIONS + 1))
 
-    (
-      cd "$root"
-      RB_LITE_PREV_SESSION=$prev_session PROMPT=$prompt REVIEW_FILES=$review_files_env RUN_DIR=$RUN_DIR ROUND=$round ITERATION=$iter "${implementer_argv[@]}" </dev/null
-    ) >"$stdout" 2>"$stderr" &
-    ACTIVE_CHILD_PIDS=("$!")
-    if wait "$!"; then
-      rc=0
-    else
-      rc=$?
-    fi
-    ACTIVE_CHILD_PIDS=()
+    # A transient provider error (rate limit / overloaded / 5xx / network) clears
+    # on its own, so retry the SAME iteration with backoff rather than failing the
+    # round. The iteration counter does not advance — a retry re-runs the same
+    # prompt, exactly as the normal stabilization loop already re-runs the
+    # implementer on a changed worktree. A timeout (124), a SIGKILL (137), or any
+    # non-transient failure is not a provider blip and falls through to the
+    # failure handling below.
+    api_retries=0
+    while :; do
+      (
+        cd "$root"
+        RB_LITE_PREV_SESSION=$prev_session PROMPT=$prompt REVIEW_FILES=$review_files_env RUN_DIR=$RUN_DIR ROUND=$round ITERATION=$iter "${implementer_argv[@]}" </dev/null
+      ) >"$stdout" 2>"$stderr" &
+      ACTIVE_CHILD_PIDS=("$!")
+      if wait "$!"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      ACTIVE_CHILD_PIDS=()
+
+      (( rc != 0 )) || break
+      (( max_api_retries > 0 )) || break
+      (( api_retries < max_api_retries )) || break
+      # A timeout (124) or a SIGKILL (137, e.g. `timeout --kill-after` escalating
+      # past a process that ignored SIGTERM) is a hang/kill, not a transient API
+      # error — never retry it, even if the killed output happened to print a
+      # transient marker. 124 is the timeout convention regardless of whether
+      # rb-lite set the timeout, so it is excluded unconditionally like 137.
+      (( rc != 124 )) || break
+      (( rc != 137 )) || break
+      implementer_failure_is_transient "$stdout" "$stderr" || break
+
+      delay=$(implementer_retry_delay "$api_retries")
+      api_retries=$((api_retries + 1))
+      log_msg "round $round implementer iteration $iter hit a transient API error (exit $rc); retry $api_retries/$max_api_retries in ${delay}s"
+      sleep "$delay"
+    done
 
     prev_session=
     if [[ -n $session_regex ]]; then
