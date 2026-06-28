@@ -292,20 +292,22 @@ the JSON on success; failure messages still go to stderr.
 - `RB_LITE_REVIEWERS_FILE`
 - `RB_LITE_MIN_FINDINGS_SEVERITY`
 - `RB_LITE_RUN_DIR`
-- `RB_LITE_API_RETRY_DELAYS` (space-separated backoff seconds before retrying an implementer iteration that failed with a transient provider error; last value repeats; default `10 30 60`)
+- `RB_LITE_API_RETRY_DELAYS` (space-separated backoff seconds before retrying an implementer iteration that failed with a transient provider error; last value repeats; default `10 30 60`; structured `retry_after` values are used as a delay floor)
 - `RB_LITE_API_MAX_RETRIES` (max transient-error retries per implementer iteration; default `10`; `0` disables)
 
 ## Transient implementer errors
 
 When an implementer iteration exits non-zero because of a **transient provider
-error** — an API rate limit (HTTP 429), an `overloaded`/529, a 5xx, or a network
-blip — rb-lite retries the *same* iteration with backoff instead of failing the
-round. These failures clear on their own, and a retry just re-runs the same
-prompt — exactly what the normal stabilization loop already does on every
-iteration — so retrying is almost always the right move. The default backoff is
-`10s, 30s, 60s, 60s, …` (the last `RB_LITE_API_RETRY_DELAYS` value repeats), up
-to `RB_LITE_API_MAX_RETRIES` (default 10) retries per iteration. A retry does not
-advance the iteration counter (`--max-iters`).
+error** — an API rate limit (HTTP 429), an `overloaded`/529, Cloudflare 522, a
+5xx, or a network blip — rb-lite retries the *same* iteration with backoff
+instead of failing the round. These failures clear on their own, and a retry just
+re-runs the same prompt — exactly what the normal stabilization loop already
+does on every iteration — so retrying is almost always the right move. The
+default backoff is `10s, 30s, 60s, 60s, …` (the last
+`RB_LITE_API_RETRY_DELAYS` value repeats), up to `RB_LITE_API_MAX_RETRIES`
+(default 10) retries per iteration. If provider output includes a structured
+`retry_after` value, rb-lite uses it as a floor over the configured schedule. A
+retry does not advance the iteration counter (`--max-iters`).
 
 Only genuine transient errors are retried. A timeout (124), a SIGKILL (137, e.g.
 `timeout --kill-after` escalating past a process that ignored SIGTERM), and any

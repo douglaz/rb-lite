@@ -20,6 +20,9 @@ unexpected_error() {
 trap unexpected_error ERR
 
 DEFAULT_PROMPT=$'Read AGENTS.md if present. If review files are provided, address the findings\nin those reviews. Otherwise implement the requested work. Stop when no code or\ntest changes are needed.'
+TRANSIENT_OUTPUT_PATTERN='"api_error_status"[[:space:]]*:[[:space:]]*(408|425|429|500|502|503|504|522|529)|"(error|type|error_name)"[[:space:]]*:[[:space:]]*"(rate_?limit(_error)?|overloaded(_error)?|api_error|server_error)"|rate[ _-]?limit|temporarily limiting requests|too many requests|overloaded|service unavailable|bad gateway|gateway time-?out|connection (error|reset|refused|closed|timed out)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|stream (disconnected|error)|(internal )?server (error|had an error)|api error[^[:digit:]]{0,8}(408|425|429|500|502|503|504|529)|http[ /]?(408|425|429|500|502|503|504|522|529)|status[ _-]?code[^[:digit:]]{0,4}(408|425|429|500|502|503|504|522|529)|cloudflare[^[:digit:]]{0,40}522|522[^[:alpha:]]{0,40}cloudflare|"(status|error_code)"[[:space:]]*:[[:space:]]*522.*"cloudflare_error"[[:space:]]*:[[:space:]]*true|"cloudflare_error"[[:space:]]*:[[:space:]]*true.*"(status|error_code)"[[:space:]]*:[[:space:]]*522|"(error|type|error_name)"[[:space:]]*:[[:space:]]*"connection_timeout".*"cloudflare_error"[[:space:]]*:[[:space:]]*true|"cloudflare_error"[[:space:]]*:[[:space:]]*true.*"(error|type|error_name)"[[:space:]]*:[[:space:]]*"connection_timeout"|\b529\b'
+RETRY_AFTER_PATTERN='"retry[_-]after"[[:space:]]*:[[:space:]]*"?[0-9]+"?|retry-after[[:space:]]*:[[:space:]]*[0-9]+'
+readonly TRANSIENT_OUTPUT_PATTERN RETRY_AFTER_PATTERN
 
 usage() {
   cat <<'EOF'
@@ -90,7 +93,9 @@ Environment:
                           Space-separated backoff, in seconds, before retrying an
                           implementer iteration that failed with a TRANSIENT
                           provider error (rate limit / overloaded / 5xx /
-                          network). The last value repeats. Default: "10 30 60".
+                          Cloudflare 522 / network). The last value repeats,
+                          unless provider output includes retry_after with a
+                          larger delay. Default: "10 30 60".
   RB_LITE_API_MAX_RETRIES Maximum transient-error retries for a single
                           implementer iteration before the round fails. Default:
                           10. Set to 0 to disable retrying.
@@ -366,19 +371,49 @@ build_prompt() {
 }
 
 # Heuristic: did an implementer iteration fail because of a TRANSIENT provider
-# error (rate limit / overloaded / 5xx / network blip) rather than a real,
+# error (rate limit / overloaded / 5xx / Cloudflare 522 / network blip) rather than a real,
 # work-affecting failure? Inspects the captured stdout + stderr. A transient
 # error did no work (the git state is unchanged) and clears on its own, so the
 # same iteration is worth retrying with backoff; a genuine failure must still
 # fail the round fast. Deliberately broad enough to catch both the claude CLI's
 # structured `"api_error_status": 429` / `"error": "rate_limit"` and codex/other
 # providers' plain-text "rate limit" / "overloaded" / "Too Many Requests" / 5xx
-# / connection-error messages.
+# / Cloudflare 522 / connection-error messages.
+implementer_output_file_is_transient() {
+  local file=$1
+  grep -qiE "$TRANSIENT_OUTPUT_PATTERN" -- "$file" 2>/dev/null
+}
+
+implementer_output_line_is_transient() {
+  local line=$1
+  grep -qiE "$TRANSIENT_OUTPUT_PATTERN" <<<"$line" 2>/dev/null
+}
+
 implementer_failure_is_transient() {
   local stdout=$1 stderr=$2
-  grep -qiE \
-    '"api_error_status"[[:space:]]*:[[:space:]]*(408|425|429|500|502|503|504|529)|"(error|type)"[[:space:]]*:[[:space:]]*"(rate_?limit(_error)?|overloaded(_error)?|api_error|server_error)"|rate[ _-]?limit|temporarily limiting requests|too many requests|overloaded|service unavailable|bad gateway|gateway time-?out|connection (error|reset|refused|closed|timed out)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|stream (disconnected|error)|(internal )?server (error|had an error)|http[ /]?(408|425|429|500|502|503|504|529)|status[ _-]?code[^[:digit:]]{0,4}(408|425|429|500|502|503|504|529)|\b529\b' \
-    -- "$stdout" "$stderr" 2>/dev/null
+  implementer_output_file_is_transient "$stderr" || implementer_output_file_is_transient "$stdout"
+}
+
+# Provider error payloads sometimes include a structured retry_after value. When
+# present, use it as a floor over rb-lite's retry schedule.
+implementer_retry_after_delay() {
+  local stdout=$1 stderr=$2 line match source
+  if implementer_output_file_is_transient "$stderr"; then
+    source=$stderr
+  elif implementer_output_file_is_transient "$stdout"; then
+    source=$stdout
+  else
+    return
+  fi
+
+  while IFS= read -r line || [[ -n $line ]]; do
+    implementer_output_line_is_transient "$line" || continue
+    match=$(grep -Eiom1 "$RETRY_AFTER_PATTERN" <<<"$line" 2>/dev/null || true)
+    if [[ $match =~ ([0-9]+) ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return
+    fi
+  done <"$source"
 }
 
 # Backoff, in seconds, before the Nth (0-based) transient-error retry. Read from
@@ -415,7 +450,7 @@ run_implementer_loop() {
   shift 6
   local -a review_paths=("$@")
   local iter before after prompt stdout stderr rc review_files_env prev_session session_regex line
-  local api_retries max_api_retries delay
+  local api_retries max_api_retries delay retry_after_delay retry_after_note
   local -a implementer_argv
 
   if (( ${#review_paths[@]} > 0 )); then
@@ -479,8 +514,14 @@ run_implementer_loop() {
       implementer_failure_is_transient "$stdout" "$stderr" || break
 
       delay=$(implementer_retry_delay "$api_retries")
+      retry_after_delay=$(implementer_retry_after_delay "$stdout" "$stderr")
+      retry_after_note=
+      if [[ -n $retry_after_delay ]] && (( retry_after_delay > delay )); then
+        delay=$retry_after_delay
+        retry_after_note=" (provider retry_after ${retry_after_delay}s)"
+      fi
       api_retries=$((api_retries + 1))
-      log_msg "round $round implementer iteration $iter hit a transient API error (exit $rc); retry $api_retries/$max_api_retries in ${delay}s"
+      log_msg "round $round implementer iteration $iter hit a transient API error (exit $rc); retry $api_retries/$max_api_retries in ${delay}s${retry_after_note}"
       sleep "$delay"
     done
 
