@@ -294,6 +294,26 @@ the JSON on success; failure messages still go to stderr.
 - `RB_LITE_RUN_DIR`
 - `RB_LITE_API_RETRY_DELAYS` (space-separated backoff seconds before retrying an implementer iteration that failed with a transient provider error; last value repeats; default `10 30 60`; structured `retry_after` values are used as a delay floor)
 - `RB_LITE_API_MAX_RETRIES` (max transient-error retries per implementer iteration; default `10`; `0` disables)
+- `RB_LITE_SCRUB_ENV` (space-separated env var names unset before any implementer/reviewer runs; default scrubs the Claude Code session/instance **identity** markers — `CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH`; auth and behavior flags — incl. `CLAUDE_CODE_RETRY_WATCHDOG`, claude's 429/529 capacity wait — are preserved; set empty to disable — see "Running under an agent")
+
+## Running under an agent (nested Claude Code)
+
+rb-lite is often driven by an orchestrating agent that is *itself* a Claude Code
+session. Without care, the `claude` implementer/reviewer it spawns would inherit
+that session's identity — `CLAUDE_CODE_SESSION_ID`, `CLAUDECODE`, … — and collide
+with the parent session: the parent's stdio breaks while rb-lite waits on the
+child, rb-lite exits without a JSON summary, and the child is orphaned.
+
+rb-lite therefore scrubs those session/instance markers at startup so each spawned
+`claude` starts a **fresh** session. Only **identity** markers are scrubbed.
+**Auth is preserved** — `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, and
+`ANTHROPIC_*` are never touched, so the fresh session reuses the existing
+credentials — and so are **behavior flags** like `CLAUDE_CODE_RETRY_WATCHDOG`
+(claude's indefinite wait on `429`/`529` capacity limits), so a nested child keeps
+that resilience rather than falling back to rb-lite's bounded retries alone.
+Outside a Claude Code session the markers are unset and this is a no-op. Override
+the scrub list with `RB_LITE_SCRUB_ENV` (space-separated names), or set it empty to
+disable.
 
 ## Transient implementer errors
 

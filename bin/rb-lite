@@ -19,6 +19,25 @@ unexpected_error() {
 }
 trap unexpected_error ERR
 
+# Scrub inherited Claude Code session/instance markers so a spawned `claude`
+# implementer/reviewer starts a FRESH session. When rb-lite is driven by an agent
+# that is itself a Claude Code session, the child would otherwise inherit that
+# session's identity (CLAUDE_CODE_SESSION_ID, CLAUDECODE, ...) and collide with it:
+# the parent session's stdio breaks while rb-lite waits on the child, rb-lite dies
+# with no JSON summary, and the child is orphaned. Auth is deliberately preserved —
+# CLAUDE_CONFIG_DIR / CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_* are never touched, so the
+# fresh session reuses the existing credentials. Only IDENTITY markers are scrubbed;
+# behavior flags are kept — notably CLAUDE_CODE_RETRY_WATCHDOG, which lets claude wait
+# out 429/529 capacity limits indefinitely (strip it via RB_LITE_SCRUB_ENV only if you
+# want rb-lite's bounded retries to be the sole limiter). Override the list with
+# RB_LITE_SCRUB_ENV (space-separated names); set it empty to disable. Outside a
+# Claude Code session these vars are unset, so this is a no-op.
+read -r -a _rb_scrub_env <<<"${RB_LITE_SCRUB_ENV-CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH}"
+if (( ${#_rb_scrub_env[@]} > 0 )); then
+  unset -v "${_rb_scrub_env[@]}" 2>/dev/null || true
+fi
+unset -v _rb_scrub_env
+
 DEFAULT_PROMPT=$'Read AGENTS.md if present. If review files are provided, address the findings\nin those reviews. Otherwise implement the requested work. Stop when no code or\ntest changes are needed.'
 TRANSIENT_OUTPUT_PATTERN='"api_error_status"[[:space:]]*:[[:space:]]*(408|425|429|500|502|503|504|522|529)|"(error|type|error_name)"[[:space:]]*:[[:space:]]*"(rate_?limit(_error)?|overloaded(_error)?|api_error|server_error)"|rate[ _-]?limit|temporarily limiting requests|too many requests|overloaded|service unavailable|bad gateway|gateway time-?out|connection (error|reset|refused|closed|timed out)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|stream (disconnected|error)|(internal )?server (error|had an error)|api error[^[:digit:]]{0,8}(408|425|429|500|502|503|504|529)|http[ /]?(408|425|429|500|502|503|504|522|529)|status[ _-]?code[^[:digit:]]{0,4}(408|425|429|500|502|503|504|522|529)|cloudflare[^[:digit:]]{0,40}522|522[^[:alpha:]]{0,40}cloudflare|"(status|error_code)"[[:space:]]*:[[:space:]]*522.*"cloudflare_error"[[:space:]]*:[[:space:]]*true|"cloudflare_error"[[:space:]]*:[[:space:]]*true.*"(status|error_code)"[[:space:]]*:[[:space:]]*522|"(error|type|error_name)"[[:space:]]*:[[:space:]]*"connection_timeout".*"cloudflare_error"[[:space:]]*:[[:space:]]*true|"cloudflare_error"[[:space:]]*:[[:space:]]*true.*"(error|type|error_name)"[[:space:]]*:[[:space:]]*"connection_timeout"|\b529\b'
 RETRY_AFTER_PATTERN='"retry[_-]after"[[:space:]]*:[[:space:]]*"?[0-9]+"?|retry-after[[:space:]]*:[[:space:]]*[0-9]+'
@@ -99,6 +118,13 @@ Environment:
   RB_LITE_API_MAX_RETRIES Maximum transient-error retries for a single
                           implementer iteration before the round fails. Default:
                           10. Set to 0 to disable retrying.
+  RB_LITE_SCRUB_ENV       Space-separated env var names unset before any
+                          implementer/reviewer runs, so a claude child driven from
+                          inside a Claude Code session starts a fresh session
+                          instead of colliding with the parent. Default scrubs the
+                          Claude Code session/instance markers (CLAUDECODE,
+                          CLAUDE_CODE_SESSION_ID, ...); auth vars are preserved. Set
+                          empty to disable.
 
 There is no default implementer. Pass --implementer claude|codex,
 --implementer claude,codex, --implement-cmd, or the matching
