@@ -52,12 +52,23 @@ The implementation should live in `~/rb-lite`.
   `RB_LITE_PREV_SESSION` is set.
 - The `claude` implementer preset should run
   `claude -p "$PROMPT" --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"`.
-- The default implementer prompt should say:
+- The default implementer prompt should let the implementer challenge the panel
+  (findings are hypotheses, not orders) and resist over-specification, and should
+  say roughly:
 
 ```text
 Read AGENTS.md if present. If review files are provided, address the findings
-in those reviews. Otherwise implement the requested work. Stop when no code or
-test changes are needed.
+in those reviews. Treat each finding as a hypothesis you may challenge, not an
+order. If a finding is a false positive, or is over-specification (it adds
+mechanism, hardening, config, or abstraction that no real correctness, security,
+or data-loss requirement needs), do NOT implement it. Instead record a brief
+reasoned rejection (the finding plus why) in a file named challenges-round-$ROUND.md
+inside the run directory $RUN_DIR. Apply the over-specification test before adding
+anything: if you simply do not do it, does a real correctness/security/data-loss
+problem break, or only an operational inconvenience? Make the smallest correct
+change that closes a real problem; do not add speculative hardening beyond what
+the task needs. A documented rejection is a valid outcome. Otherwise implement the
+requested work. Stop when no code or test changes are needed.
 ```
 
 - Support a user-supplied task prompt via either a command-line flag or prompt

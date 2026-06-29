@@ -253,6 +253,31 @@ Implementers run with stdin closed. Custom implementers should read
 `REVIEW_FILES` (or just rely on `PROMPT`, which enumerates the paths). The
 legacy `REVIEW_FILE` (singular, combined-doc) env var was removed.
 
+### The implementer may challenge the panel
+
+The default implementer prompt treats reviewer findings as **hypotheses, not
+orders**. The implementer is told to decline a finding when it's a false positive
+or **over-specification** (it adds mechanism, hardening, config, or abstraction
+that no real correctness, security, or data-loss requirement needs), and to
+record a reasoned rejection in `challenges-round-$ROUND.md` under the run dir
+instead of implementing it. This is deliberate counter-pressure: the reviewer
+panel only ever pushes toward *adding*, so without it a "simple" change ratchets
+into speculative hardening over successive rounds.
+
+A round where the implementer declines the remaining findings with documented
+reasons is a legitimate outcome, not a stall. If it persists for
+`--max-noop-rounds`, rb-lite still exits `13` (`consensus_failure`) — read the
+`challenges-round-*.md` files and the latest review to decide whether you side
+with the implementer (accept the run) or the panel (apply the fix yourself). A
+custom `--implement-cmd` that uses `$PROMPT` receives these instructions too; a
+wrapper that ignores or replaces `$PROMPT` is responsible for equivalent
+challenge behavior.
+
+To add counter-pressure on the *reviewer* side too, put a skeptical reviewer in
+`.rb-lite-reviewers` that hunts over-specification (flagging what to CUT /
+SIMPLIFY / DEFER) alongside the bug-finding reviewers. See "Customizing the
+reviewer panel."
+
 ## Stop conditions and exit codes
 
 | Code | Status | Meaning |
