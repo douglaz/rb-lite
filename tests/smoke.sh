@@ -2178,6 +2178,64 @@ exit 124
   assert_last_stdout_summary /tmp/rb-lite-test.out implementer_failed 10
 }
 
+test_scrubs_inherited_claude_code_session_env() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/scrub-run"
+  # When the orchestrator is itself a Claude Code session it exports
+  # CLAUDE_CODE_SESSION_ID / CLAUDECODE; the spawned implementer must NOT inherit
+  # them (it would collide with the parent session and crash rb-lite). Dump the
+  # implementer's environment and assert those markers were scrubbed.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+env > .rb-lite/impl-env
+printf "done\n"
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" \
+      CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=parent-collision \
+      CLAUDE_CODE_ENTRYPOINT=cli CLAUDE_CODE_EXECPATH=/x/claude \
+      CLAUDE_CODE_RETRY_WATCHDOG=1 \
+      "$repo/bin/rb-lite" run --task scrub --max-rounds 1 --max-iters 1 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/dev/null
+  ) || status=$?
+
+  assert_equals 0 "$status" "a no-op implementer run is clean"
+  assert_file_not_contains "$repo/.rb-lite/impl-env" '^CLAUDE_CODE_SESSION_ID=' "the parent session id is scrubbed from the implementer env"
+  assert_file_not_contains "$repo/.rb-lite/impl-env" '^CLAUDECODE=' "the CLAUDECODE marker is scrubbed from the implementer env"
+  assert_file_contains "$repo/.rb-lite/impl-env" '^CLAUDE_CODE_RETRY_WATCHDOG=1$' "the retry watchdog (a behavior flag, not an identity marker) is preserved"
+}
+
+test_env_scrub_can_be_disabled() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/noscrub-run"
+  # RB_LITE_SCRUB_ENV= (empty) opts out of scrubbing entirely.
+  write_fake "$repo" fake-implementer '
+mkdir -p .rb-lite
+env > .rb-lite/impl-env
+printf "done\n"
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  (
+    cd "$repo"
+    PATH="$repo/fakes:$PATH" RB_LITE_SCRUB_ENV='' CLAUDE_CODE_SESSION_ID=keepme \
+      "$repo/bin/rb-lite" run --task noscrub --max-rounds 1 --max-iters 1 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/dev/null
+  ) || status=$?
+
+  assert_equals 0 "$status" "a no-op implementer run is clean"
+  assert_file_contains "$repo/.rb-lite/impl-env" '^CLAUDE_CODE_SESSION_ID=keepme$' "RB_LITE_SCRUB_ENV= leaves the inherited env untouched"
+}
+
 mkdir -p "$TMP_ROOT"
 require_timeout_with_kill_after
 
@@ -2195,6 +2253,8 @@ test_implementer_retries_cloudflare_522_and_honors_retry_after
 test_unrelated_stdout_retry_after_is_ignored
 test_sigkilled_implementer_is_not_retried
 test_exit_124_is_not_retried_without_timeout
+test_scrubs_inherited_claude_code_session_env
+test_env_scrub_can_be_disabled
 test_p1_review_triggers_remediation_round
 test_persistent_noop_implementer_consensus_failure_after_default_threshold
 test_max_rounds_hit_exits_12
