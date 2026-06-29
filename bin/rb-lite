@@ -38,7 +38,7 @@ if (( ${#_rb_scrub_env[@]} > 0 )); then
 fi
 unset -v _rb_scrub_env
 
-DEFAULT_PROMPT=$'Read AGENTS.md if present. If review files are provided, address the findings\nin those reviews. Otherwise implement the requested work. Stop when no code or\ntest changes are needed.'
+DEFAULT_PROMPT=$'Read AGENTS.md if present. If review files are provided, address the findings\nin those reviews. Treat each finding as a hypothesis you may challenge, not an\norder. If a finding is a false positive, or is over-specification (it adds\nmechanism, hardening, config, or abstraction that no real correctness, security,\nor data-loss requirement needs), do NOT implement it. Instead record a brief\nreasoned rejection (the finding plus why) in a file named\nchallenges-round-$ROUND.md inside the run directory $RUN_DIR. Apply the\nover-specification test before adding anything: if you simply do not do it, does a\nreal correctness/security/data-loss problem break, or only an operational\ninconvenience? Make the smallest correct change that closes a real problem; do not\nadd speculative hardening beyond what the task needs. A documented rejection is a\nvalid outcome. Otherwise implement the requested work. Stop when no code or test\nchanges are needed.'
 TRANSIENT_OUTPUT_PATTERN='"api_error_status"[[:space:]]*:[[:space:]]*(408|425|429|500|502|503|504|522|529)|"(error|type|error_name)"[[:space:]]*:[[:space:]]*"(rate_?limit(_error)?|overloaded(_error)?|api_error|server_error)"|rate[ _-]?limit|temporarily limiting requests|too many requests|overloaded|service unavailable|bad gateway|gateway time-?out|connection (error|reset|refused|closed|timed out)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|stream (disconnected|error)|(internal )?server (error|had an error)|api error[^[:digit:]]{0,8}(408|425|429|500|502|503|504|529)|http[ /]?(408|425|429|500|502|503|504|522|529)|status[ _-]?code[^[:digit:]]{0,4}(408|425|429|500|502|503|504|522|529)|cloudflare[^[:digit:]]{0,40}522|522[^[:alpha:]]{0,40}cloudflare|"(status|error_code)"[[:space:]]*:[[:space:]]*522.*"cloudflare_error"[[:space:]]*:[[:space:]]*true|"cloudflare_error"[[:space:]]*:[[:space:]]*true.*"(status|error_code)"[[:space:]]*:[[:space:]]*522|"(error|type|error_name)"[[:space:]]*:[[:space:]]*"connection_timeout".*"cloudflare_error"[[:space:]]*:[[:space:]]*true|"cloudflare_error"[[:space:]]*:[[:space:]]*true.*"(error|type|error_name)"[[:space:]]*:[[:space:]]*"connection_timeout"|\b529\b'
 RETRY_AFTER_PATTERN='"retry[_-]after"[[:space:]]*:[[:space:]]*"?[0-9]+"?|retry-after[[:space:]]*:[[:space:]]*[0-9]+'
 readonly TRANSIENT_OUTPUT_PATTERN RETRY_AFTER_PATTERN
@@ -392,7 +392,7 @@ build_prompt() {
     for p in "${review_paths[@]}"; do
       printf '  %s\n' "$p"
     done
-    printf 'Address the actionable %s findings across these reviews, then stop when no code or test changes are needed.\n' "${ACTIONABLE_FINDINGS_SEVERITIES:-P0/P1/P2}"
+    printf 'Address the actionable %s findings across these reviews by fixing real issues or recording a reasoned rejection for false positives or over-specification, then stop when no code or test changes are needed.\n' "${ACTIONABLE_FINDINGS_SEVERITIES:-P0/P1/P2}"
   fi
 }
 
