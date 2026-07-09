@@ -100,13 +100,16 @@ write_fake() {
 write_fake_jq_result_extractor() {
   local repo=$1
   write_fake "$repo" jq '
-expected="if .is_error then error(.result // \"claude reviewer returned is_error\") else (.result // empty) end"
+expected="if .type == \"result\" then if ((.is_error // false) or (((.subtype // \"\") | tostring) | test(\"error|fail\"))) then error(.result // \"claude reviewer returned is_error\") else (.result // empty) end else empty end"
 if [[ ${1:-} != -er || ${2:-} != "$expected" ]]; then
   printf "unexpected jq args: %s\n" "$*" >&2
   exit 94
 fi
 input=$(cat)
-if [[ $input == *"\"is_error\":true"* || $input == *"\"is_error\": true"* ]]; then
+if [[ $input != *"\"type\":\"result\""* && $input != *"\"type\": \"result\""* ]]; then
+  exit 4
+fi
+if [[ $input == *"\"is_error\":true"* || $input == *"\"is_error\": true"* || $input == *"\"subtype\":\"error"* || $input == *"\"subtype\":\"fail"* ]]; then
   result=${input#*\"result\":\"}
   result=${result%%\"*}
   printf "jq: error: %s\n" "$result" >&2
@@ -751,6 +754,7 @@ test_claude_implementer_preset_uses_headless_accept_edits() {
   repo=$(new_repo)
   write_fake "$repo" claude '
 mkdir -p .rb-lite
+printf "%s\n" "${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-}" >.rb-lite/claude-max-output-tokens
 printf "%s\n" "$#" >.rb-lite/claude-argc
 i=1
 for arg in "$@"; do
@@ -764,6 +768,7 @@ done
   run_rb_lite "$repo" run --task "claude preset task marker" --max-rounds 1 --max-iters 1 \
     --implementer claude >/tmp/rb-lite-test.out
 
+  assert_equals 128000 "$(cat "$repo/.rb-lite/claude-max-output-tokens")" "claude preset max output tokens"
   assert_equals 9 "$(cat "$repo/.rb-lite/claude-argc")" "claude preset arg count"
   assert_equals -p "$(cat "$repo/.rb-lite/claude-arg1")" "claude prompt flag"
   assert_file_contains "$repo/.rb-lite/claude-arg2" 'claude preset task marker'
@@ -1460,8 +1465,10 @@ esac
 '
   write_fake "$repo" claude '
 mkdir -p .rb-lite
+printf "%s\n" "${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-}" >.rb-lite/claude-max-output-tokens
 printf "%s\n" "$*" >.rb-lite/claude-args
-printf "{\"result\":\"claude says clean from json\"}\n"
+printf "{\"type\":\"system\",\"subtype\":\"init\"}\n"
+printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"claude says clean from stream-json\"}\n"
 '
   write_fake "$repo" npx '
 mkdir -p .rb-lite
@@ -1499,17 +1506,19 @@ printf "gemini says clean\n"
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
 
   assert_file_contains "$run_dir/review-round-1-1.md" 'codex says clean'
-  assert_file_contains "$run_dir/review-round-1-2.md" 'claude says clean from json'
+  assert_file_contains "$run_dir/review-round-1-2.md" 'claude says clean from stream-json'
   assert_file_contains "$run_dir/review-round-1-3.md" 'gemini says clean'
+  assert_equals 128000 "$(cat "$repo/.rb-lite/claude-max-output-tokens")" "default claude reviewer max output tokens"
   assert_file_contains "$repo/.rb-lite/claude-args" 'permission-mode acceptEdits'
-  assert_file_contains "$repo/.rb-lite/claude-args" 'output-format json'
+  assert_file_contains "$repo/.rb-lite/claude-args" 'output-format stream-json'
+  assert_file_contains "$repo/.rb-lite/claude-args" 'verbose'
   assert_file_contains "$repo/.rb-lite/claude-args" 'allowedTools'
   assert_file_contains "$repo/.rb-lite/claude-args" 'Bash,Edit,Write,Read,Glob,Grep'
   if grep -q 'dangerously-skip-permissions' "$repo/.rb-lite/claude-args"; then
     fail "default claude reviewer must not use --dangerously-skip-permissions"
   fi
-  if grep -q '{"result"' "$run_dir/review-round-1-2.md"; then
-    fail "default claude reviewer should write extracted .result text, not raw JSON"
+  if grep -q '{"type"' "$run_dir/review-round-1-2.md"; then
+    fail "default claude reviewer should write extracted result text, not raw stream JSON"
   fi
   assert_file_contains "$repo/.rb-lite/claude-args" 'base ref '
   assert_equals 8 "$(cat "$repo/.rb-lite/npx-argc")" "default npx arg count"
@@ -1536,7 +1545,7 @@ test_default_claude_reviewer_is_error_is_operational_failure() {
   write_fake "$repo" fake-implementer 'printf "noop\n"'
   write_fake_jq_result_extractor "$repo"
   write_fake "$repo" codex 'printf "codex unavailable\n" >&2; exit 2'
-  write_fake "$repo" claude 'printf "{\"is_error\":true,\"result\":\"claude reviewer hit max turns\"}\n"'
+  write_fake "$repo" claude 'printf "{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,\"result\":\"claude reviewer hit max turns\"}\n"'
   write_fake "$repo" npx 'printf "gemini unavailable\n" >&2; exit 3'
 
   status=0
@@ -1584,7 +1593,7 @@ case "${1:-}" in
     ;;
 esac
 '
-  write_fake "$repo" claude 'printf "{\"result\":\"claude says clean\"}\n"'
+  write_fake "$repo" claude 'printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"claude says clean\"}\n"'
   write_fake "$repo" npx '
 mkdir -p .rb-lite
 printf "npx should not run when repo-local Gemini exists\n" >.rb-lite/npx-ran

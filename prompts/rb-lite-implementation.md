@@ -51,7 +51,7 @@ The implementation should live in `~/rb-lite`.
   resuming the prior same-round session with `codex exec resume` when
   `RB_LITE_PREV_SESSION` is set.
 - The `claude` implementer preset should run
-  `claude -p "$PROMPT" --permission-mode acceptEdits --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"`.
+  `CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "$PROMPT" --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"`.
 - The default implementer prompt should let the implementer challenge the panel
   (findings are hypotheses, not orders) and resist over-specification, and should
   say roughly:

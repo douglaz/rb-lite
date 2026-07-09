@@ -29,7 +29,8 @@ trap unexpected_error ERR
 # fresh session reuses the existing credentials. Only IDENTITY markers are scrubbed;
 # behavior flags are kept — notably CLAUDE_CODE_RETRY_WATCHDOG, which lets claude wait
 # out 429/529 capacity limits indefinitely (strip it via RB_LITE_SCRUB_ENV only if you
-# want rb-lite's bounded retries to be the sole limiter). Override the list with
+# want rb-lite's bounded retries to be the sole limiter). rb-lite's built-in claude
+# commands explicitly set CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000. Override the list with
 # RB_LITE_SCRUB_ENV (space-separated names); set it empty to disable. Outside a
 # Claude Code session these vars are unset, so this is a no-op.
 read -r -a _rb_scrub_env <<<"${RB_LITE_SCRUB_ENV-CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH}"
@@ -139,6 +140,7 @@ parse implementer stdout. Override RB_LITE_SESSION_REGEX to support non-codex
 session ID formats, or set it empty to disable capture. The first capture group
 is used, or the full match when no group is present; no match or an empty
 capture leaves RB_LITE_PREV_SESSION empty.
+Built-in claude calls force CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000.
 
 By default, only P0/P1/P2 reviewer findings trigger another implementer round;
 this is a deliberate behavior change, so P3-only output is considered clean.
@@ -148,13 +150,13 @@ the old strict P3 behavior.
 Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
 three-reviewer panel:
   codex review --base "$BASE"
-  set -o pipefail; claude -p "<P0..P3 review prompt>" --permission-mode acceptEdits --output-format json --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .is_error then error(.result // "claude reviewer returned is_error") else (.result // empty) end'
+  set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<P0..P3 review prompt>" --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
   npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "<P0..P3 review prompt>"
 rb-lite writes "$RUN_DIR/gemini-policy.toml" per run; it grants all-tool access.
 codex, claude, and jq must be on PATH. jq extracts the default claude reviewer's
-final text from claude --output-format json and fails if claude reports
-is_error. The Gemini reviewer also needs npx on PATH plus GEMINI_API_KEY or an
-OAuth login previously stored by gemini-cli.
+final result event from claude --output-format stream-json and fails if claude
+reports is_error or an error/failure subtype. The Gemini reviewer also needs npx
+on PATH plus GEMINI_API_KEY or an OAuth login previously stored by gemini-cli.
 Without Gemini credentials, the third reviewer just fails and the panel falls
 back to codex+claude. Override the panel by writing .rb-lite-reviewers.
 The panel succeeds as long as at least one reviewer exits 0; failed reviewers
@@ -207,7 +209,7 @@ implement_cmd_for_preset() {
 
   case $name in
     claude)
-      printf '%s\n' 'claude -p "$PROMPT" --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"'
+      printf '%s\n' 'CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "$PROMPT" --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"'
       ;;
     codex)
       printf '%s\n' 'if [[ -n ${RB_LITE_PREV_SESSION:-} ]]; then codex exec resume --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$RB_LITE_PREV_SESSION" "$PROMPT"; else codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"; fi'
@@ -604,7 +606,7 @@ load_reviewers() {
   if ((${#REVIEWERS[@]} == 0)); then
     REVIEWERS=(
       'codex review --base "$BASE"'
-      'set -o pipefail; claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). If there are no actionable findings, output exactly: No findings. Do not modify any files." --permission-mode acceptEdits --output-format json --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er '\''if .is_error then error(.result // "claude reviewer returned is_error") else (.result // empty) end'\'''
+      'set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). If there are no actionable findings, output exactly: No findings. Do not modify any files." --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'\'''
       'if [[ -e node_modules/@google/gemini-cli || -L node_modules/@google/gemini-cli || -e node_modules/.bin/gemini || -L node_modules/.bin/gemini ]]; then printf "%s\n" "rb-lite: refusing to run default Gemini reviewer because this repository has a local Gemini CLI package/bin that npx could prefer; customize .rb-lite-reviewers if this is intentional" >&2; exit 1; fi; npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). If there are no actionable findings, output exactly: No findings. Do not modify any files."'
     )
   fi
