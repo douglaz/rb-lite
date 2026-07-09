@@ -68,15 +68,15 @@ and (B) wrap those dependencies via Nix automatically.
   panel includes `codex review`.
 - `claude` CLI on `PATH`, authenticated, if your implementer preset/cycle
   includes `claude` or you use the default reviewer panel. The claude
-  implementer preset uses `claude -p`
-  with `--permission-mode acceptEdits --output-format stream-json --verbose`
-  and a broad allowed-tools list (matches the sister `ralph-burning` project).
+  implementer preset uses `--permission-mode acceptEdits --output-format
+  stream-json --verbose` with a broad allowed-tools list (matches the sister
+  `ralph-burning` project).
+  Built-in Claude calls force `CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000`.
 - `jq` on `PATH` if you use the default reviewer panel from a source checkout
   (Nix installs wrap it automatically). The default claude reviewer uses
-  `claude -p` with `--output-format json` and pipes stdout through
-  `jq -er 'if .is_error then error(.result // "claude reviewer returned is_error") else (.result // empty) end'`
-  so findings text remains parseable on stdout and Claude errors or missing
-  results fail the reviewer.
+  `--output-format stream-json --verbose` and pipes stdout through `jq` to
+  extract the final result event, so findings text remains parseable on stdout
+  and Claude errors or missing results fail the reviewer.
 - `npx` on `PATH` plus Gemini credentials for the third default reviewer:
   either `GEMINI_API_KEY` in the environment or an existing OAuth login stored
   by `gemini-cli`. rb-lite grants the reviewer full tool access (shell exec,
@@ -113,8 +113,9 @@ You can override or replace either side — see "Configuration" below.
                  ┌───────────────────────────▼───────────────────────┐
                  │ Review panel (concurrent)                         │
                  │  • codex review --base X                          │
-                 │  • claude -p "<prompt>" --output-format json      │
-                 │    | jq -er '<extract .result; fail on is_error>' │
+                 │  • claude -p "<prompt>" --output-format stream-json │
+                 │    --verbose | jq -er '<extract result event;     │
+                 │    fail on Claude error>'                         │
                  │  • npx -y @google/gemini-cli --policy … -p "…"    │
                  │  • each writes review-round-N-K.md                │
                  └───────────────────────────┬───────────────────────┘
@@ -183,15 +184,16 @@ The default panel is fine for most cases. To override, drop a
 ```
 # .rb-lite-reviewers
 codex review --base "$BASE"
-set -o pipefail; claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --permission-mode acceptEdits --output-format json --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .is_error then error(.result // "claude reviewer returned is_error") else (.result // empty) end'
+set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
 npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean."
 my-custom-linter --json | wrap-as-p-tags
 ```
 
 Reviewers run **concurrently**, each gets `BASE`, `RUN_DIR`, `ROUND`,
 `REVIEWER_INDEX` in env, and stdin closed. The default claude reviewer requires
-`jq` because it extracts `.result` from `claude --output-format json` and fails
-when Claude reports `is_error`. By default, each reviewer is wrapped in
+`jq` because it extracts the final result event from
+`claude --output-format stream-json` and fails when Claude reports `is_error` or
+an error/failure subtype. By default, each reviewer is wrapped in
 `timeout` (default 30m); a timed-out reviewer counts as a failed reviewer and is
 recorded in its per-reviewer markdown file, but does not abort the panel as long
 as at least one reviewer succeeds.
@@ -233,7 +235,7 @@ Resolution order is `--implement-cmd`, `--implementer`,
 The claude implementer preset runs:
 
 ```bash
-claude -p "$PROMPT" --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"
+CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "$PROMPT" --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor"
 ```
 
 rb-lite ignores the implementer's stdout; the preset still runs Claude's agentic
@@ -319,7 +321,7 @@ the JSON on success; failure messages still go to stderr.
 - `RB_LITE_RUN_DIR`
 - `RB_LITE_API_RETRY_DELAYS` (space-separated backoff seconds before retrying an implementer iteration that failed with a transient provider error; last value repeats; default `10 30 60`; structured `retry_after` values are used as a delay floor)
 - `RB_LITE_API_MAX_RETRIES` (max transient-error retries per implementer iteration; default `10`; `0` disables)
-- `RB_LITE_SCRUB_ENV` (space-separated env var names unset before any implementer/reviewer runs; default scrubs the Claude Code session/instance **identity** markers — `CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH`; auth and behavior flags — incl. `CLAUDE_CODE_RETRY_WATCHDOG`, claude's 429/529 capacity wait — are preserved; set empty to disable — see "Running under an agent")
+- `RB_LITE_SCRUB_ENV` (space-separated env var names unset before any implementer/reviewer runs; default scrubs the Claude Code session/instance **identity** markers — `CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH`; auth and behavior flags — incl. `CLAUDE_CODE_RETRY_WATCHDOG`, claude's 429/529 capacity wait — are preserved; built-in Claude commands explicitly set `CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000`; set empty to disable scrubbing — see "Running under an agent")
 
 ## Running under an agent (nested Claude Code)
 
@@ -335,7 +337,9 @@ rb-lite therefore scrubs those session/instance markers at startup so each spawn
 `ANTHROPIC_*` are never touched, so the fresh session reuses the existing
 credentials — and so are **behavior flags** like `CLAUDE_CODE_RETRY_WATCHDOG`
 (claude's indefinite wait on `429`/`529` capacity limits), so a nested child keeps
-that resilience rather than falling back to rb-lite's bounded retries alone.
+that resilience rather than falling back to rb-lite's bounded retries alone. The
+built-in Claude implementer and reviewer also set
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000` explicitly.
 Outside a Claude Code session the markers are unset and this is a no-op. Override
 the scrub list with `RB_LITE_SCRUB_ENV` (space-separated names), or set it empty to
 disable.
