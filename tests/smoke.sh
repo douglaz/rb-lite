@@ -1534,6 +1534,11 @@ printf "gemini says clean\n"
   assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.rb-lite/'
   assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.ralph-burning/'
   assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.git/ralph-burning-live/'
+  # Verify-before-asserting guard: a reviewer must not claim an out-of-diff invariant is violated
+  # without reading the code (prevents the cross-file false-positive echo chamber). Rides on the
+  # claude + gemini defaults; `codex review` cannot take a custom prompt with --base (see bin note).
+  assert_file_contains "$repo/.rb-lite/gemini-prompt" 'QUESTION not a finding'
+  assert_file_contains "$repo/.rb-lite/claude-args" 'QUESTION not a finding'
   assert_file_contains "$repo/.rb-lite/gemini-prompt" 'No findings\.'
   assert_file_contains "$repo/.rb-lite/gemini-prompt" 'Do not modify any files'
 }
