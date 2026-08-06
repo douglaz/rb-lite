@@ -170,6 +170,15 @@ The default panel is fine for most cases. To override, drop a
 `.rb-lite-reviewers` file in your repo root with one shell command per line
 (blank lines and `#` comments ignored):
 
+> **Upgrading from a version with the Gemini reviewer:** `$RUN_DIR/gemini-policy.toml`
+> is no longer generated, because it existed only for the default Gemini reviewer that
+> has been removed. A custom `.rb-lite-reviewers` line that passes
+> `--policy "$RUN_DIR/gemini-policy.toml"` will now point at a file that does not
+> exist. Drop that reviewer, or write your own policy file and reference that instead.
+> Left unchanged it fails at run time — the panel still proceeds on whichever reviewers
+> succeed, so the symptom is a quieter panel and a `N of M reviewers succeeded` line in
+> the log, not an error.
+
 ```
 # .rb-lite-reviewers
 codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
