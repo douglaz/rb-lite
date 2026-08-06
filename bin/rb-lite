@@ -148,17 +148,13 @@ Use --min-findings-severity P3 or RB_LITE_MIN_FINDINGS_SEVERITY=P3 to preserve
 the old strict P3 behavior.
 
 Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
-three-reviewer panel:
-  codex review --base "$BASE"
-  set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<P0..P3 review prompt>" --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
-  npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "<P0..P3 review prompt>"
-rb-lite writes "$RUN_DIR/gemini-policy.toml" per run; it grants all-tool access.
+two-reviewer panel with both models pinned:
+  codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
+  set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<P0..P3 review prompt>" --model opus --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
 codex, claude, and jq must be on PATH. jq extracts the default claude reviewer's
 final result event from claude --output-format stream-json and fails if claude
-reports is_error or an error/failure subtype. The Gemini reviewer also needs npx
-on PATH plus GEMINI_API_KEY or an OAuth login previously stored by gemini-cli.
-Without Gemini credentials, the third reviewer just fails and the panel falls
-back to codex+claude. Override the panel by writing .rb-lite-reviewers.
+reports is_error or an error/failure subtype. Override the panel by writing
+.rb-lite-reviewers.
 The panel succeeds as long as at least one reviewer exits 0; failed reviewers
 are noted in their per-reviewer markdown files but do not abort the run.
 
@@ -607,12 +603,11 @@ load_reviewers() {
     REVIEWERS=(
       # NOTE: `codex review` rejects a custom [PROMPT] together with --base (they are mutually
       # exclusive), so the verify-before-asserting guard below cannot be injected into the default
-      # codex reviewer — it rides on the claude + gemini defaults instead. codex's diff-blindness to
+      # codex reviewer — it rides on the claude default instead. codex's diff-blindness to
       # out-of-diff invariants is otherwise mitigated by the implementer guard (do not weaken
       # invariant comments without code proof) + staging new files so they appear in the diff.
-      'codex review --base "$BASE"'
-      'set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). Before asserting that the diff violates or overstates an invariant, or any claim about behavior in code the diff does not show, VERIFY it by reading that code and cite file:line; do not infer a cross-file property from the diff alone, and if you cannot verify such a claim mark it a QUESTION not a finding. If there are no actionable findings, output exactly: No findings. Do not modify any files." --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'\'''
-      'if [[ -e node_modules/@google/gemini-cli || -L node_modules/@google/gemini-cli || -e node_modules/.bin/gemini || -L node_modules/.bin/gemini ]]; then printf "%s\n" "rb-lite: refusing to run default Gemini reviewer because this repository has a local Gemini CLI package/bin that npx could prefer; customize .rb-lite-reviewers if this is intentional" >&2; exit 1; fi; npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). Before asserting that the diff violates or overstates an invariant, or any claim about behavior in code the diff does not show, VERIFY it by reading that code and cite file:line; do not infer a cross-file property from the diff alone, and if you cannot verify such a claim mark it a QUESTION not a finding. If there are no actionable findings, output exactly: No findings. Do not modify any files."'
+      'codex review --base "$BASE" -c '\''model="gpt-5.6-sol"'\'''
+      'set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). Before asserting that the diff violates or overstates an invariant, or any claim about behavior in code the diff does not show, VERIFY it by reading that code and cite file:line; do not infer a cross-file property from the diff alone, and if you cannot verify such a claim mark it a QUESTION not a finding. If there are no actionable findings, output exactly: No findings. Do not modify any files." --model opus --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'\'''
     )
   fi
 }
@@ -947,13 +942,6 @@ run_command() {
   SUMMARY_STARTED_AT=$(date -u +%s)
   LOG_FILE="$RUN_DIR/log.txt"
   : >"$LOG_FILE" || die_with "$EXIT_ENV" "failed to initialize run log: $LOG_FILE"
-  cat >"$RUN_DIR/gemini-policy.toml" <<'EOF' \
-    || die_with "$EXIT_ENV" "failed to initialize Gemini policy: $RUN_DIR/gemini-policy.toml"
-[[rule]]
-toolName = "*"
-decision = "allow"
-priority = 1
-EOF
   log_msg "run directory: $RUN_DIR"
   log_msg "base: $base"
   log_msg "max rounds: $max_rounds; max no-op rounds: $max_noop_rounds; max implementer iterations: $max_iters"
