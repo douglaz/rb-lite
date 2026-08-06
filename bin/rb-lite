@@ -2,6 +2,11 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
+# Bumped deliberately, and reported by `--version` so a caller can require a floor.
+# A build without this command predates it; callers treat `unknown command: --version`
+# as "too old" rather than assuming a capability is present.
+RB_LITE_VERSION=0.2.0
+readonly RB_LITE_VERSION
 TIMEOUT_KILL_AFTER=5s
 readonly TIMEOUT_KILL_AFTER
 readonly EXIT_USAGE=2
@@ -147,10 +152,14 @@ this is a deliberate behavior change, so P3-only output is considered clean.
 Use --min-findings-severity P3 or RB_LITE_MIN_FINDINGS_SEVERITY=P3 to preserve
 the old strict P3 behavior.
 
+`--version` prints the version and exits 0. A build that answers "unknown command:
+--version" predates the read-only reviewer panel below; callers that require it should
+treat that as too old rather than assuming.
+
 Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
 two-reviewer panel with both models pinned:
   codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
-  set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<P0..P3 review prompt>" --model claude-opus-5 --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
+  set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<P0..P3 review prompt>" --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git merge-base:*),Bash(git blame:*),Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
 codex, claude, and jq must be on PATH. The default reviewer pins gpt-5.6-sol, so
 your codex CLI must be able to select it (verified on 0.146.0). If it cannot,
 that reviewer fails and the panel proceeds on the remaining one — see the
@@ -610,7 +619,7 @@ load_reviewers() {
       # out-of-diff invariants is otherwise mitigated by the implementer guard (do not weaken
       # invariant comments without code proof) + staging new files so they appear in the diff.
       'codex review --base "$BASE" -c '\''model="gpt-5.6-sol"'\'''
-      'set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). Before asserting that the diff violates or overstates an invariant, or any claim about behavior in code the diff does not show, VERIFY it by reading that code and cite file:line; do not infer a cross-file property from the diff alone, and if you cannot verify such a claim mark it a QUESTION not a finding. If there are no actionable findings, output exactly: No findings. Do not modify any files." --model claude-opus-5 --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'\'''
+      'set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). Before asserting that the diff violates or overstates an invariant, or any claim about behavior in code the diff does not show, VERIFY it by reading that code and cite file:line; do not infer a cross-file property from the diff alone, and if you cannot verify such a claim mark it a QUESTION not a finding. If there are no actionable findings, output exactly: No findings. Do not modify any files." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git merge-base:*),Bash(git blame:*),Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'\'''
     )
   fi
 }
@@ -1017,6 +1026,9 @@ main() {
       ;;
     -h|--help)
       usage
+      ;;
+    --version|-V)
+      printf '%s %s\n' "$PROGRAM" "$RB_LITE_VERSION"
       ;;
     *)
       SUMMARY_ENABLED=1
