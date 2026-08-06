@@ -65,10 +65,14 @@ and (B) wrap those dependencies via Nix automatically.
   includes `codex` or you use the default reviewer panel. The codex preset runs
   `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"`,
   reusing the same session within a round when possible. The default reviewer
-  panel includes `codex review`. **Requires codex CLI >= 0.144.0**, the first
-  release carrying the `gpt-5.6` family the default reviewer pins; an older CLI
-  cannot select `gpt-5.6-sol`, so that reviewer fails and the panel proceeds on
-  the remaining one — a degraded panel rather than a hard error.
+  panel includes `codex review`. The default reviewer pins `gpt-5.6-sol`, so
+  your codex CLI has to be able to select it — **verified working on 0.146.0**.
+  The `gpt-5.6` family first appears in codex release notes at `rust-v0.143.0`
+  (2026-07-08), but those entries describe the Amazon Bedrock catalog, so they do
+  not establish the floor for the default path; check your CLI rather than trust a
+  version number. If it cannot select the model that reviewer fails and the panel
+  proceeds on the remaining one — a degraded panel, logged as
+  `N of 2 reviewers succeeded`, not a hard error.
 - `claude` CLI on `PATH`, authenticated, if your implementer preset/cycle
   includes `claude` or you use the default reviewer panel. The claude
   implementer preset uses `--permission-mode acceptEdits --output-format
