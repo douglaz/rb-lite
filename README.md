@@ -192,7 +192,7 @@ The default panel is fine for most cases. To override, drop a
 ```
 # .rb-lite-reviewers
 codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
-set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Bash,Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
+set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit,Bash" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
 my-custom-linter --json | wrap-as-p-tags
 ```
 

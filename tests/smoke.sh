@@ -1459,19 +1459,20 @@ test_version_matches_flake_version() {
 }
 
 test_version_command_reports_a_version() {
-  local repo out status
+  local repo out short_out status
   repo=$(new_repo)
   status=0
   out=$(run_rb_lite "$repo" --version 2>/dev/null) || status=$?
   assert_equals 0 "$status" "--version exit status"
-  case "$out" in
-    "rb-lite "[0-9]*.[0-9]*.[0-9]*) : ;;
-    *) fail "--version should print 'rb-lite <semver>', got: $out" ;;
-  esac
+  # A glob would accept "rb-lite 0abc.x.y" — [0-9]* matches any trailing characters.
+  # Anchored regex, and -V must produce byte-identical output, not merely exit 0.
+  [[ $out =~ ^rb-lite\ [0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || fail "--version should print 'rb-lite <semver>', got: $out"
   # -V is the same command; callers script either.
   status=0
-  out=$(run_rb_lite "$repo" -V 2>/dev/null) || status=$?
+  short_out=$(run_rb_lite "$repo" -V 2>/dev/null) || status=$?
   assert_equals 0 "$status" "-V exit status"
+  assert_equals "$out" "$short_out" "-V output matches --version"
 }
 
 test_default_reviewer_panel_runs_codex_and_claude() {
@@ -1549,12 +1550,21 @@ exit 97
   # make a reviewer read-only while it still holds unrestricted Bash: `sed -i`, `rm`, a
   # shell redirect or `git checkout` all write. Verified empirically that the pattern form
   # both permits `git diff` and blocks a redirect.
-  assert_file_contains "$repo/.rb-lite/claude-args" 'Bash\(git diff'
-  # Unrestricted Bash is `Bash` followed by a comma or the closing quote; the restricted
-  # form is always `Bash(`. Matching on that distinction rather than on presence.
-  if grep -qE 'allowedTools "([^"]*,)?Bash[,"]' "$repo/.rb-lite/claude-args"; then
-    fail "default claude reviewer must not hold UNRESTRICTED Bash"
+  # NO Bash at all. A restricted allowlist was not enough: Bash(git diff:*) still
+  # authorized `git diff --output=FILE`, which git happily writes — demonstrated, not
+  # theorised. The reviewer does not need a shell; rb-lite's own shell writes the diff
+  # into RUN_DIR and the reviewer reads it.
+  # NOTE ON THE PATTERNS: the fake records "$*", so the shell has already stripped the
+  # quotes — a pattern containing a double quote can NEVER match here. The previous
+  # unrestricted-Bash guard did contain quotes and was therefore vacuous: it passed whatever
+  # the reviewer was granted. Verified against a real recorded args line before use.
+  # Anchored on the leading `--`: "disallowedTools" CONTAINS "allowedTools", so an
+  # unanchored pattern fires on the deny list and flags correct code.
+  if grep -qE -- '--allowedTools [^ ]*Bash' "$repo/.rb-lite/claude-args"; then
+    fail "default claude reviewer must not be granted Bash in any form"
   fi
+  assert_file_contains "$repo/.rb-lite/claude-args" 'disallowedTools Edit,Write,NotebookEdit,Bash'
+  assert_file_contains "$repo/.rb-lite/claude-args" 'reviewer-diff-round-'
   if grep -q 'dangerously-skip-permissions' "$repo/.rb-lite/claude-args"; then
     fail "default claude reviewer must not use --dangerously-skip-permissions"
   fi
