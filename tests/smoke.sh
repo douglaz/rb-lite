@@ -1446,6 +1446,18 @@ test_reviewer_config_writes_per_reviewer_files() {
   [[ ! -e $run_dir/latest-review.md ]] || fail "latest-review.md should not exist (combined doc dropped)"
 }
 
+test_version_matches_flake_version() {
+  # Two files carry the version. They drifted the moment --version was added (flake said
+  # 0.1.0, the binary said 0.2.0), which would ship a derivation whose name disagrees with
+  # the tool inside it. Asserted rather than remembered.
+  local script_v flake_v
+  script_v=$(sed -n 's/^RB_LITE_VERSION=\(.*\)$/\1/p' "$ROOT/bin/rb-lite")
+  flake_v=$(sed -n 's/^ *version = "\(.*\)";$/\1/p' "$ROOT/flake.nix" | head -1)
+  [ -n "$script_v" ] || fail "no RB_LITE_VERSION in bin/rb-lite"
+  [ -n "$flake_v" ] || fail "no version in flake.nix"
+  assert_equals "$script_v" "$flake_v" "bin/rb-lite and flake.nix version"
+}
+
 test_version_command_reports_a_version() {
   local repo out status
   repo=$(new_repo)
@@ -2272,6 +2284,7 @@ test_dirty_symlink_retarget_affects_stability
 test_rb_lite_artifacts_do_not_affect_stability
 test_custom_run_dir_does_not_affect_stability
 test_reviewer_config_writes_per_reviewer_files
+test_version_matches_flake_version
 test_version_command_reports_a_version
 test_default_reviewer_panel_runs_codex_and_claude
 test_default_claude_reviewer_is_error_is_operational_failure
