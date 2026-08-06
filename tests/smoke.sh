@@ -1446,6 +1446,22 @@ test_reviewer_config_writes_per_reviewer_files() {
   [[ ! -e $run_dir/latest-review.md ]] || fail "latest-review.md should not exist (combined doc dropped)"
 }
 
+test_version_command_reports_a_version() {
+  local repo out status
+  repo=$(new_repo)
+  status=0
+  out=$(run_rb_lite "$repo" --version 2>/dev/null) || status=$?
+  assert_equals 0 "$status" "--version exit status"
+  case "$out" in
+    "rb-lite "[0-9]*.[0-9]*.[0-9]*) : ;;
+    *) fail "--version should print 'rb-lite <semver>', got: $out" ;;
+  esac
+  # -V is the same command; callers script either.
+  status=0
+  out=$(run_rb_lite "$repo" -V 2>/dev/null) || status=$?
+  assert_equals 0 "$status" "-V exit status"
+}
+
 test_default_reviewer_panel_runs_codex_and_claude() {
   local repo run_dir
   repo=$(new_repo)
@@ -1499,11 +1515,25 @@ exit 97
   assert_file_contains "$repo/.rb-lite/claude-args" '[-][-]model claude-opus-5'
 
   assert_equals 128000 "$(cat "$repo/.rb-lite/claude-max-output-tokens")" "default claude reviewer max output tokens"
-  assert_file_contains "$repo/.rb-lite/claude-args" 'permission-mode acceptEdits'
+  # READ-ONLY reviewer. The prompt says "do not modify any files"; before this the tools
+  # said otherwise — acceptEdits plus Edit/Write let a reviewer mutate the worktree while
+  # the codex reviewer was reading it, so the two could review different trees and any edit
+  # bypassed the implementer loop entirely.
+  # --disallowedTools is the part that actually denies: restricting --allowedTools alone
+  # produces zero denials, so dropping Edit/Write from that list would look right and
+  # change nothing.
+  assert_file_contains "$repo/.rb-lite/claude-args" '[-][-]disallowedTools'
+  assert_file_contains "$repo/.rb-lite/claude-args" 'Edit,Write,NotebookEdit'
+  if grep -q 'permission-mode acceptEdits' "$repo/.rb-lite/claude-args"; then
+    fail "default claude REVIEWER must not run with acceptEdits (the implementer preset may)"
+  fi
+  if grep -qE 'allowedTools "[^"]*(Edit|Write)' "$repo/.rb-lite/claude-args"; then
+    fail "default claude reviewer must not be granted Edit/Write"
+  fi
   assert_file_contains "$repo/.rb-lite/claude-args" 'output-format stream-json'
   assert_file_contains "$repo/.rb-lite/claude-args" 'verbose'
   assert_file_contains "$repo/.rb-lite/claude-args" 'allowedTools'
-  assert_file_contains "$repo/.rb-lite/claude-args" 'Bash,Edit,Write,Read,Glob,Grep'
+  assert_file_contains "$repo/.rb-lite/claude-args" 'Bash,Read,Glob,Grep'
   if grep -q 'dangerously-skip-permissions' "$repo/.rb-lite/claude-args"; then
     fail "default claude reviewer must not use --dangerously-skip-permissions"
   fi
@@ -2242,6 +2272,7 @@ test_dirty_symlink_retarget_affects_stability
 test_rb_lite_artifacts_do_not_affect_stability
 test_custom_run_dir_does_not_affect_stability
 test_reviewer_config_writes_per_reviewer_files
+test_version_command_reports_a_version
 test_default_reviewer_panel_runs_codex_and_claude
 test_default_claude_reviewer_is_error_is_operational_failure
 test_reviewer_exit_two_is_operational_failure

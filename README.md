@@ -164,6 +164,16 @@ Each run gets `.rb-lite/runs/<UTC-timestamp>-<pid>/` with:
 Progress lines are also mirrored to **stderr** in real time so long runs are
 visible in the terminal. Suppress with `2>/dev/null` if you want quiet.
 
+The default Claude reviewer is **read-only**: it gets `Bash,Read,Glob,Grep` plus web
+tools, and `--disallowedTools "Edit,Write,NotebookEdit"`. Restricting `--allowedTools`
+alone does not deny anything, so the explicit deny list is what enforces it. A reviewer
+that can write would let one panel member mutate the worktree while the other reads it —
+the two would then review different trees, and the edit would bypass the implementer loop.
+The implementer preset is a different command and keeps its write access.
+
+`rb-lite --version` prints the version. A build that answers `unknown command: --version`
+predates this read-only panel, which is the signal a caller should use to require it.
+
 ## Customizing the reviewer panel
 
 The default panel is fine for most cases. To override, drop a
@@ -182,7 +192,7 @@ The default panel is fine for most cases. To override, drop a
 ```
 # .rb-lite-reviewers
 codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
-set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --model claude-opus-5 --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
+set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Bash,Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
 my-custom-linter --json | wrap-as-p-tags
 ```
 
