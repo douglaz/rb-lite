@@ -164,12 +164,20 @@ Each run gets `.rb-lite/runs/<UTC-timestamp>-<pid>/` with:
 Progress lines are also mirrored to **stderr** in real time so long runs are
 visible in the terminal. Suppress with `2>/dev/null` if you want quiet.
 
-The default Claude reviewer is **read-only**: it gets `Bash,Read,Glob,Grep` plus web
-tools, and `--disallowedTools "Edit,Write,NotebookEdit"`. Restricting `--allowedTools`
-alone does not deny anything, so the explicit deny list is what enforces it. A reviewer
-that can write would let one panel member mutate the worktree while the other reads it —
-the two would then review different trees, and the edit would bypass the implementer loop.
-The implementer preset is a different command and keeps its write access.
+The default Claude reviewer has **no shell**: it gets `Read,Glob,Grep` plus web tools, and
+`--disallowedTools "Edit,Write,NotebookEdit,Bash"`. Restricting `--allowedTools` alone
+does not deny anything, so the explicit deny list is what enforces it.
+
+Denying only the editing tools was not enough. A reviewer holding `Bash` can write —
+`sed -i`, `rm`, a redirect, `git checkout` — and even an allowlist as narrow as
+`Bash(git diff:*)` still permits `git diff --output=FILE`, which git creates. So the
+reviewer gets no shell at all, and rb-lite writes the diff it needs to
+`$RUN_DIR/reviewer-diff-round-$ROUND.patch` for it to `Read`.
+
+That matters because a reviewer that can write would let one panel member mutate the
+worktree while the other reads it — the two would then review different trees — and its
+edits would bypass the implementer loop. The implementer preset is a different command and
+keeps its write access, because writing is its job.
 
 `rb-lite --version` prints the version. A build that answers `unknown command: --version`
 predates this read-only panel, which is the signal a caller should use to require it.
@@ -192,7 +200,7 @@ The default panel is fine for most cases. To override, drop a
 ```
 # .rb-lite-reviewers
 codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
-set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit,Bash" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
+set -o pipefail; { git diff "$BASE" || printf "%s\n" "rb-lite: could not compute a diff against $BASE"; } >"$RUN_DIR/reviewer-diff-round-$ROUND.patch" 2>&1; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. The diff is in $RUN_DIR/reviewer-diff-round-$ROUND.patch — read that file first; if it holds an rb-lite error instead of a diff, report that as P1 and do not call the change clean. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit,Bash" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
 my-custom-linter --json | wrap-as-p-tags
 ```
 
