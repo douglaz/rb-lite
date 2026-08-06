@@ -4,9 +4,9 @@
 
 A small Bash CLI that drives an **implement → review** loop using an explicit
 `claude`/`codex` implementer preset, a preset cycle, or a custom command. It
-uses codex, [`claude`](https://docs.anthropic.com/claude/docs/claude-code), and
-Gemini CLI as the default reviewer panel. Repeatedly invokes the implementer
-until the git diff stabilizes, runs the reviewer panel in parallel, feeds
+uses codex and [`claude`](https://docs.anthropic.com/claude/docs/claude-code) as
+the default reviewer panel, with both models pinned. Repeatedly invokes the
+implementer until the git diff stabilizes, runs the reviewer panel in parallel, feeds
 P0/P1/P2 findings back into the implementer, and stops when the panel is clean,
 the implementer refuses to act on remaining findings, or a budget cap is hit.
 
@@ -29,7 +29,7 @@ That single command:
 1. Builds rb-lite from source (cached after first run)
 2. Spawns the selected implementer preset or preset cycle in your repo's
    working tree
-3. Loops implementer ↔ panel-reviewer (codex + claude, plus Gemini when available)
+3. Loops implementer ↔ panel-reviewer (codex + claude)
 4. Stops when the panel reports no actionable findings, exits clean
 
 Artifacts land in `.rb-lite/runs/<timestamp>-<pid>/`.
@@ -65,7 +65,14 @@ and (B) wrap those dependencies via Nix automatically.
   includes `codex` or you use the default reviewer panel. The codex preset runs
   `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"`,
   reusing the same session within a round when possible. The default reviewer
-  panel includes `codex review`.
+  panel includes `codex review`. The default reviewer pins `gpt-5.6-sol`, so
+  your codex CLI has to be able to select it — **verified working on 0.146.0**.
+  The `gpt-5.6` family first appears in codex release notes at `rust-v0.143.0`
+  (2026-07-08), but those entries describe the Amazon Bedrock catalog, so they do
+  not establish the floor for the default path; check your CLI rather than trust a
+  version number. If it cannot select the model that reviewer fails and the panel
+  proceeds on the remaining one — a degraded panel, logged as
+  `N of 2 reviewers succeeded`, not a hard error.
 - `claude` CLI on `PATH`, authenticated, if your implementer preset/cycle
   includes `claude` or you use the default reviewer panel. The claude
   implementer preset uses `--permission-mode acceptEdits --output-format
@@ -77,23 +84,6 @@ and (B) wrap those dependencies via Nix automatically.
   `--output-format stream-json --verbose` and pipes stdout through `jq` to
   extract the final result event, so findings text remains parseable on stdout
   and Claude errors or missing results fail the reviewer.
-- `npx` on `PATH` plus Gemini credentials for the third default reviewer:
-  either `GEMINI_API_KEY` in the environment or an existing OAuth login stored
-  by `gemini-cli`. rb-lite grants the reviewer full tool access (shell exec,
-  file ops) via a per-run policy file at `$RUN_DIR/gemini-policy.toml`; the
-  reviewer prompt still says "Do not modify any files." — that prompt is the
-  only restraint on writes, same trust model as `codex review`. The working
-  directory must also be trusted by gemini-cli (one-time interactive `gemini`
-  trust prompt, or `GEMINI_CLI_TRUST_WORKSPACE=true` in the environment), or
-  the reviewer fails and the panel falls back to codex+claude. rb-lite
-  intentionally does NOT pass `--skip-trust`, so a malicious in-repo
-  `.gemini/settings.json` from an untrusted PR cannot inject hooks or MCP
-  servers into the review. As a further safeguard, the default Gemini reviewer
-  refuses to run when the repository has a local `@google/gemini-cli` package or
-  `gemini` bin under `node_modules/` (which `npx` could prefer over the pinned
-  package); it logs a refusal to stderr and the panel falls back to codex+claude.
-  Write your own `.rb-lite-reviewers` if running a repo-local Gemini CLI is
-  intentional.
 
 You can override or replace either side — see "Configuration" below.
 
@@ -116,7 +106,6 @@ You can override or replace either side — see "Configuration" below.
                  │  • claude -p "<prompt>" --output-format stream-json │
                  │    --verbose | jq -er '<extract result event;     │
                  │    fail on Claude error>'                         │
-                 │  • npx -y @google/gemini-cli --policy … -p "…"    │
                  │  • each writes review-round-N-K.md                │
                  └───────────────────────────┬───────────────────────┘
                                              │
@@ -181,11 +170,19 @@ The default panel is fine for most cases. To override, drop a
 `.rb-lite-reviewers` file in your repo root with one shell command per line
 (blank lines and `#` comments ignored):
 
+> **Upgrading from a version with the Gemini reviewer:** `$RUN_DIR/gemini-policy.toml`
+> is no longer generated, because it existed only for the default Gemini reviewer that
+> has been removed. A custom `.rb-lite-reviewers` line that passes
+> `--policy "$RUN_DIR/gemini-policy.toml"` will now point at a file that does not
+> exist. Drop that reviewer, or write your own policy file and reference that instead.
+> Left unchanged it fails at run time — the panel still proceeds on whichever reviewers
+> succeed, so the symptom is a quieter panel and a `N of M reviewers succeeded` line in
+> the log, not an error.
+
 ```
 # .rb-lite-reviewers
-codex review --base "$BASE"
-set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
-npx -y @google/gemini-cli --policy "$RUN_DIR/gemini-policy.toml" --approval-mode yolo -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean."
+codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
+set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --model claude-opus-5 --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
 my-custom-linter --json | wrap-as-p-tags
 ```
 
@@ -369,7 +366,7 @@ they fail the round immediately.
 # Enter a shell with bash, git, just, ripgrep
 nix develop
 
-# Run the smoke suite (fakes codex/claude/Gemini — no API credentials needed)
+# Run the smoke suite (fakes codex/claude — no API credentials needed)
 just test
 
 # Full local gate (lint + smoke + nix flake check)
@@ -377,7 +374,7 @@ just check
 ```
 
 The smoke tests cover the loop's behavior with fake implementer and reviewer
-binaries on `PATH`. They do not exercise live codex/claude/Gemini.
+binaries on `PATH`. They do not exercise live codex/claude.
 
 ## Notes
 

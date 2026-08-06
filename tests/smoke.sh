@@ -1446,13 +1446,15 @@ test_reviewer_config_writes_per_reviewer_files() {
   [[ ! -e $run_dir/latest-review.md ]] || fail "latest-review.md should not exist (combined doc dropped)"
 }
 
-test_default_reviewer_panel_runs_codex_claude_and_gemini() {
+test_default_reviewer_panel_runs_codex_and_claude() {
   local repo run_dir
   repo=$(new_repo)
   run_dir="$repo/.rb-lite/default-panel"
   write_fake "$repo" fake-implementer 'printf "noop\n"'
   write_fake_jq_result_extractor "$repo"
   write_fake "$repo" codex '
+mkdir -p .rb-lite
+printf "%s\n" "$*" >.rb-lite/codex-args
 case "${1:-}" in
   review)
     printf "codex says clean\n"
@@ -1470,36 +1472,13 @@ printf "%s\n" "$*" >.rb-lite/claude-args
 printf "{\"type\":\"system\",\"subtype\":\"init\"}\n"
 printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"claude says clean from stream-json\"}\n"
 '
+  # The default panel must not reach for npx at all. A fake that records being called is
+  # how "Gemini was removed" is asserted rather than assumed.
   write_fake "$repo" npx '
 mkdir -p .rb-lite
-printf "%s\n" "$#" >.rb-lite/npx-argc
-i=1
-for arg in "$@"; do
-  printf "%s\n" "$arg" >".rb-lite/npx-arg-$i"
-  i=$((i + 1))
-done
-policy=${4:-}
-if [[ $# -ne 8 || ${1:-} != -y || ${2:-} != @google/gemini-cli || ${3:-} != --policy || $policy != */gemini-policy.toml || ${5:-} != --approval-mode || ${6:-} != yolo || ${7:-} != -p ]]; then
-  printf "unexpected npx args: %s\n" "$*" >&2
-  exit 98
-fi
-if [[ ! -f $policy ]]; then
-  printf "missing Gemini policy file: %s\n" "$policy" >&2
-  exit 97
-fi
-if ! grep -Eq "toolName[[:space:]]*=[[:space:]]*\"\\*\"" "$policy" \
-  || ! grep -Eq "decision[[:space:]]*=[[:space:]]*\"allow\"" "$policy"; then
-  printf "Gemini policy file did not grant all-tool access\n" >&2
-  exit 96
-fi
-for arg in "$@"; do
-  if [[ $arg == --skip-trust ]]; then
-    printf "default Gemini reviewer must not use --skip-trust\n" >&2
-    exit 95
-  fi
-done
-printf "%s\n" "$8" >.rb-lite/gemini-prompt
-printf "gemini says clean\n"
+printf "%s\n" "$*" >.rb-lite/npx-was-invoked
+printf "npx must not be invoked by the default panel\n" >&2
+exit 97
 '
 
   run_rb_lite "$repo" run --task "default panel" --max-rounds 1 --max-iters 1 \
@@ -1507,7 +1486,18 @@ printf "gemini says clean\n"
 
   assert_file_contains "$run_dir/review-round-1-1.md" 'codex says clean'
   assert_file_contains "$run_dir/review-round-1-2.md" 'claude says clean from stream-json'
-  assert_file_contains "$run_dir/review-round-1-3.md" 'gemini says clean'
+  if [[ -e "$run_dir/review-round-1-3.md" ]]; then
+    fail "default panel must be two reviewers, found a third"
+  fi
+  if [[ -e "$repo/.rb-lite/npx-was-invoked" ]]; then
+    fail "default panel invoked npx: $(cat "$repo/.rb-lite/npx-was-invoked")"
+  fi
+
+  # Both models are pinned. Inheriting each CLI's default would let a weaker model satisfy
+  # a panel the caller believes is running these two.
+  assert_file_contains "$repo/.rb-lite/codex-args" 'model="gpt-5\.6-sol"'
+  assert_file_contains "$repo/.rb-lite/claude-args" '[-][-]model claude-opus-5'
+
   assert_equals 128000 "$(cat "$repo/.rb-lite/claude-max-output-tokens")" "default claude reviewer max output tokens"
   assert_file_contains "$repo/.rb-lite/claude-args" 'permission-mode acceptEdits'
   assert_file_contains "$repo/.rb-lite/claude-args" 'output-format stream-json'
@@ -1521,26 +1511,10 @@ printf "gemini says clean\n"
     fail "default claude reviewer should write extracted result text, not raw stream JSON"
   fi
   assert_file_contains "$repo/.rb-lite/claude-args" 'base ref '
-  assert_equals 8 "$(cat "$repo/.rb-lite/npx-argc")" "default npx arg count"
-  assert_equals -y "$(cat "$repo/.rb-lite/npx-arg-1")" "default npx yes flag"
-  assert_equals @google/gemini-cli "$(cat "$repo/.rb-lite/npx-arg-2")" "default npx package"
-  assert_equals --policy "$(cat "$repo/.rb-lite/npx-arg-3")" "default npx policy flag"
-  assert_file_contains "$repo/.rb-lite/npx-arg-4" '/gemini-policy\.toml$'
-  assert_equals --approval-mode "$(cat "$repo/.rb-lite/npx-arg-5")" "default npx approval flag"
-  assert_equals yolo "$(cat "$repo/.rb-lite/npx-arg-6")" "default npx approval mode"
-  assert_equals -p "$(cat "$repo/.rb-lite/npx-arg-7")" "default npx prompt flag"
-  assert_file_contains "$repo/.rb-lite/gemini-prompt" 'Read AGENTS\.md'
-  assert_file_contains "$repo/.rb-lite/gemini-prompt" 'base ref '
-  assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.rb-lite/'
-  assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.ralph-burning/'
-  assert_file_contains "$repo/.rb-lite/gemini-prompt" '\.git/ralph-burning-live/'
-  # Verify-before-asserting guard: a reviewer must not claim an out-of-diff invariant is violated
-  # without reading the code (prevents the cross-file false-positive echo chamber). Rides on the
-  # claude + gemini defaults; `codex review` cannot take a custom prompt with --base (see bin note).
-  assert_file_contains "$repo/.rb-lite/gemini-prompt" 'QUESTION not a finding'
+  # Verify-before-asserting guard: a reviewer must not claim an out-of-diff invariant is
+  # violated without reading the code (prevents the cross-file false-positive echo chamber).
+  # Rides on the claude default; `codex review` cannot take a custom prompt with --base.
   assert_file_contains "$repo/.rb-lite/claude-args" 'QUESTION not a finding'
-  assert_file_contains "$repo/.rb-lite/gemini-prompt" 'No findings\.'
-  assert_file_contains "$repo/.rb-lite/gemini-prompt" 'Do not modify any files'
 }
 
 test_default_claude_reviewer_is_error_is_operational_failure() {
@@ -1551,7 +1525,6 @@ test_default_claude_reviewer_is_error_is_operational_failure() {
   write_fake_jq_result_extractor "$repo"
   write_fake "$repo" codex 'printf "codex unavailable\n" >&2; exit 2'
   write_fake "$repo" claude 'printf "{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,\"result\":\"claude reviewer hit max turns\"}\n"'
-  write_fake "$repo" npx 'printf "gemini unavailable\n" >&2; exit 3'
 
   status=0
   run_rb_lite "$repo" run --task "default claude reviewer error" --max-rounds 1 --max-iters 1 \
@@ -1561,59 +1534,11 @@ test_default_claude_reviewer_is_error_is_operational_failure() {
   assert_equals 11 "$status" "all-failed reviewer panel exit"
   assert_file_contains "$run_dir/review-round-1-2.md" 'Reviewer 2 \(exit 5'
   assert_file_contains "$run_dir/review-round-1-2.md" 'claude reviewer hit max turns'
-  assert_file_contains "$run_dir/log.txt" 'review panel failed: 0 of 3 reviewers succeeded'
+  assert_file_contains "$run_dir/log.txt" 'review panel failed: 0 of 2 reviewers succeeded'
   assert_last_stdout_summary /tmp/rb-lite-test.out review_panel_failed 11
 }
 
-test_gemini_policy_file_written_to_run_dir() {
-  local repo run_dir
-  repo=$(new_repo)
-  run_dir="$repo/.rb-lite/policy-file"
-  write_fake "$repo" fake-implementer 'printf "noop\n"'
-  write_reviewers "$repo" 'printf "policy file: %s\n" "$RUN_DIR/gemini-policy.toml"; if [[ -f "$RUN_DIR/gemini-policy.toml" ]]; then printf "exists\n"; cat "$RUN_DIR/gemini-policy.toml"; fi; printf "No findings.\n"'
 
-  run_rb_lite "$repo" run --task "policy file" --max-rounds 1 --max-iters 1 \
-    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
-
-  assert_file_contains "$run_dir/review-round-1-1.md" 'exists'
-  assert_file_contains "$run_dir/review-round-1-1.md" 'toolName[[:space:]]*=[[:space:]]*"\*"'
-  assert_file_contains "$run_dir/review-round-1-1.md" 'decision[[:space:]]*=[[:space:]]*"allow"'
-}
-
-test_default_gemini_reviewer_refuses_repo_local_package() {
-  local repo run_dir
-  repo=$(new_repo)
-  run_dir="$repo/.rb-lite/local-gemini"
-  mkdir -p "$repo/node_modules/@google/gemini-cli"
-  write_fake "$repo" fake-implementer 'printf "noop\n"'
-  write_fake_jq_result_extractor "$repo"
-  write_fake "$repo" codex '
-case "${1:-}" in
-  review)
-    printf "codex says clean\n"
-    ;;
-  *)
-    printf "unexpected codex args: %s\n" "$*" >&2
-    exit 99
-    ;;
-esac
-'
-  write_fake "$repo" claude 'printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"claude says clean\"}\n"'
-  write_fake "$repo" npx '
-mkdir -p .rb-lite
-printf "npx should not run when repo-local Gemini exists\n" >.rb-lite/npx-ran
-exit 98
-'
-
-  run_rb_lite "$repo" run --task "default panel local gemini guard" --max-rounds 1 --max-iters 1 \
-    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
-
-  assert_file_contains /tmp/rb-lite-test.out 'rb-lite clean after 1 round'
-  assert_file_contains "$run_dir/review-round-1-1.md" 'codex says clean'
-  assert_file_contains "$run_dir/review-round-1-2.md" 'claude says clean'
-  assert_file_contains "$run_dir/review-round-1-3.md" 'refusing to run default Gemini reviewer'
-  [[ ! -e $repo/.rb-lite/npx-ran ]] || fail "default Gemini reviewer should not invoke repo-local npx target"
-}
 
 test_reviewer_exit_two_is_operational_failure() {
   local repo status
@@ -2317,10 +2242,8 @@ test_dirty_symlink_retarget_affects_stability
 test_rb_lite_artifacts_do_not_affect_stability
 test_custom_run_dir_does_not_affect_stability
 test_reviewer_config_writes_per_reviewer_files
-test_default_reviewer_panel_runs_codex_claude_and_gemini
+test_default_reviewer_panel_runs_codex_and_claude
 test_default_claude_reviewer_is_error_is_operational_failure
-test_gemini_policy_file_written_to_run_dir
-test_default_gemini_reviewer_refuses_repo_local_package
 test_reviewer_exit_two_is_operational_failure
 test_reviewer_stderr_excluded_from_combined_when_clean
 test_failed_reviewer_path_omitted_from_review_files
