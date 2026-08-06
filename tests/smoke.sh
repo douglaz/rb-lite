@@ -1545,7 +1545,16 @@ exit 97
   assert_file_contains "$repo/.rb-lite/claude-args" 'output-format stream-json'
   assert_file_contains "$repo/.rb-lite/claude-args" 'verbose'
   assert_file_contains "$repo/.rb-lite/claude-args" 'allowedTools'
-  assert_file_contains "$repo/.rb-lite/claude-args" 'Bash,Read,Glob,Grep'
+  # Bash must be RESTRICTED, not merely present. Denying Edit/Write/NotebookEdit does not
+  # make a reviewer read-only while it still holds unrestricted Bash: `sed -i`, `rm`, a
+  # shell redirect or `git checkout` all write. Verified empirically that the pattern form
+  # both permits `git diff` and blocks a redirect.
+  assert_file_contains "$repo/.rb-lite/claude-args" 'Bash\(git diff'
+  # Unrestricted Bash is `Bash` followed by a comma or the closing quote; the restricted
+  # form is always `Bash(`. Matching on that distinction rather than on presence.
+  if grep -qE 'allowedTools "([^"]*,)?Bash[,"]' "$repo/.rb-lite/claude-args"; then
+    fail "default claude reviewer must not hold UNRESTRICTED Bash"
+  fi
   if grep -q 'dangerously-skip-permissions' "$repo/.rb-lite/claude-args"; then
     fail "default claude reviewer must not use --dangerously-skip-permissions"
   fi
