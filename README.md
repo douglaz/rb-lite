@@ -65,7 +65,10 @@ and (B) wrap those dependencies via Nix automatically.
   includes `codex` or you use the default reviewer panel. The codex preset runs
   `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"`,
   reusing the same session within a round when possible. The default reviewer
-  panel includes `codex review`.
+  panel includes `codex review`. **Requires codex CLI >= 0.144.0**, the first
+  release carrying the `gpt-5.6` family the default reviewer pins; an older CLI
+  cannot select `gpt-5.6-sol`, so that reviewer fails and the panel proceeds on
+  the remaining one — a degraded panel rather than a hard error.
 - `claude` CLI on `PATH`, authenticated, if your implementer preset/cycle
   includes `claude` or you use the default reviewer panel. The claude
   implementer preset uses `--permission-mode acceptEdits --output-format
@@ -166,7 +169,7 @@ The default panel is fine for most cases. To override, drop a
 ```
 # .rb-lite-reviewers
 codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
-set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --model opus --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
+set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Review the diff vs $BASE. Tag findings with P0/P1/P2/P3 severities. Output 'No findings.' if clean." --model claude-opus-5 --permission-mode acceptEdits --output-format stream-json --verbose --allowedTools "Bash,Edit,Write,Read,Glob,Grep,WebSearch,WebFetch,Task,TaskOutput,TaskStop,Monitor" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
 my-custom-linter --json | wrap-as-p-tags
 ```
 

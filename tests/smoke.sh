@@ -1496,7 +1496,7 @@ exit 97
   # Both models are pinned. Inheriting each CLI's default would let a weaker model satisfy
   # a panel the caller believes is running these two.
   assert_file_contains "$repo/.rb-lite/codex-args" 'model="gpt-5\.6-sol"'
-  assert_file_contains "$repo/.rb-lite/claude-args" '[-][-]model opus'
+  assert_file_contains "$repo/.rb-lite/claude-args" '[-][-]model claude-opus-5'
 
   assert_equals 128000 "$(cat "$repo/.rb-lite/claude-max-output-tokens")" "default claude reviewer max output tokens"
   assert_file_contains "$repo/.rb-lite/claude-args" 'permission-mode acceptEdits'
