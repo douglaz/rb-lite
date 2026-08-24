@@ -1539,8 +1539,9 @@ exit 97
   fi
   # The skeptic must be read-only and must not duplicate the defect reviewers' lens.
   assert_file_contains "$repo/.rb-lite/claude-skeptic-args" 'CUT'
-  assert_file_contains "$repo/.rb-lite/claude-skeptic-args" '[-][-]disallowedTools'
-  if grep -qE 'allowedTools "[^"]*(Edit|Write|Bash)' "$repo/.rb-lite/claude-skeptic-args"; then
+  assert_file_contains "$repo/.rb-lite/claude-skeptic-args" \
+    '[-][-]disallowedTools Edit,Write,NotebookEdit,Bash,WebSearch,WebFetch'
+  if grep -qE '[-][-]allowedTools [^ ]*(Edit|Write|Bash)' "$repo/.rb-lite/claude-skeptic-args"; then
     fail "skeptical reviewer must not be granted Edit/Write/Bash"
   fi
   if [[ -e "$repo/.rb-lite/npx-was-invoked" ]]; then
@@ -1565,7 +1566,7 @@ exit 97
   if grep -q 'permission-mode acceptEdits' "$repo/.rb-lite/claude-args"; then
     fail "default claude REVIEWER must not run with acceptEdits (the implementer preset may)"
   fi
-  if grep -qE 'allowedTools "[^"]*(Edit|Write)' "$repo/.rb-lite/claude-args"; then
+  if grep -qE '[-][-]allowedTools [^ ]*(Edit|Write)' "$repo/.rb-lite/claude-args"; then
     fail "default claude reviewer must not be granted Edit/Write"
   fi
   assert_file_contains "$repo/.rb-lite/claude-args" 'output-format stream-json'
