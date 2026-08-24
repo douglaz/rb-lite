@@ -5,7 +5,8 @@
 A small Bash CLI that drives an **implement → review** loop using an explicit
 `claude`/`codex` implementer preset, a preset cycle, or a custom command. It
 uses codex and [`claude`](https://docs.anthropic.com/claude/docs/claude-code) as
-the default reviewer panel, with both models pinned. Repeatedly invokes the
+the default reviewer panel — two defect reviewers plus a skeptic that hunts
+over-specification — with all models pinned. Repeatedly invokes the
 implementer until the git diff stabilizes, runs the reviewer panel in parallel, feeds
 P0/P1/P2 findings back into the implementer, and stops when the panel is clean,
 the implementer refuses to act on remaining findings, or a budget cap is hit.
@@ -29,7 +30,7 @@ That single command:
 1. Builds rb-lite from source (cached after first run)
 2. Spawns the selected implementer preset or preset cycle in your repo's
    working tree
-3. Loops implementer ↔ panel-reviewer (codex + claude)
+3. Loops implementer ↔ panel-reviewer (codex + claude + a claude skeptic)
 4. Stops when the panel reports no actionable findings, exits clean
 
 Artifacts land in `.rb-lite/runs/<timestamp>-<pid>/`.
@@ -71,8 +72,8 @@ and (B) wrap those dependencies via Nix automatically.
   (2026-07-08), but those entries describe the Amazon Bedrock catalog, so they do
   not establish the floor for the default path; check your CLI rather than trust a
   version number. If it cannot select the model that reviewer fails and the panel
-  proceeds on the remaining one — a degraded panel, logged as
-  `N of 2 reviewers succeeded`, not a hard error.
+  proceeds on the remaining ones — a degraded panel, logged as
+  `N of 3 reviewers succeeded`, not a hard error.
 - `claude` CLI on `PATH`, authenticated, if your implementer preset/cycle
   includes `claude` or you use the default reviewer panel. The claude
   implementer preset uses `--permission-mode acceptEdits --output-format
@@ -102,18 +103,18 @@ You can override or replace either side — see "Configuration" below.
                                              │
                  ┌───────────────────────────▼───────────────────────┐
                  │ Review panel (concurrent)                         │
-                 │  • codex review --base X                          │
-                 │  • claude -p "<prompt>" --output-format stream-json │
-                 │    --verbose | jq -er '<extract result event;     │
-                 │    fail on Claude error>'                         │
+                 │  • codex review --base X          (defects)       │
+                 │  • claude -p "<defect prompt>" | jq -er '<result>' │
+                 │  • claude -p "<over-spec prompt>" (skeptic)       │
                  │  • each writes review-round-N-K.md                │
                  └───────────────────────────┬───────────────────────┘
                                              │
                                              ▼
         clean (no P0/P1/P2)?  ──────► EXIT 0
-        all reviewers failed?  ─────► EXIT 11
+        no defect reviewer survived? ► EXIT 11
         max rounds hit?  ───────────► EXIT 12
         2 no-op rounds + findings? ─► EXIT 13 (consensus failure)
+        over --max-production-lines? ► EXIT 14 (budget exceeded)
         otherwise: feed reviews to implementer, next round
 ```
 
@@ -142,7 +143,10 @@ Common flags (full list: `rb-lite --help`):
 | `--reviewer-timeout SECS` | 1800 | SIGTERM/SIGKILL each reviewer if it runs longer; empty disables |
 | `--implementer NAME[,NAME...]` | none | Select an implementer preset (`claude` or `codex`) or comma-separated preset cycle; required unless `--implement-cmd` or env equivalent is set |
 | `--implement-cmd CMD` | none | Raw implementer subprocess escape hatch; takes precedence over presets |
-| `--reviewers-file PATH` | `.rb-lite-reviewers` | Custom reviewer panel (one shell command per line) |
+| `--reviewers-file PATH` | `.rb-lite-reviewers` | Custom reviewer panel (one shell command per line); replaces the built-in panel entirely, skeptic included |
+| `--no-skeptic` | off | Drop the skeptical reviewer from the built-in panel |
+| `--max-production-lines N` | none | Exit `14` once added lines exceed N (test/fixture paths excluded) |
+| `--budget-exclude GLOB` | test/fixture globs | Path excluded from the budget count; first use replaces the built-in list |
 | `--branch NAME` | none | `git switch -c NAME` before starting |
 | `--run-dir PATH` | `.rb-lite/runs/<id>` | Where to store run artifacts |
 
@@ -184,9 +188,15 @@ predates this read-only panel, which is the signal a caller should use to requir
 
 ## Customizing the reviewer panel
 
-The default panel is fine for most cases. To override, drop a
-`.rb-lite-reviewers` file in your repo root with one shell command per line
-(blank lines and `#` comments ignored):
+The default panel is three reviewers: `codex review`, a `claude` reviewer hunting
+defects, and a `claude` skeptic hunting over-specification. The first two look for
+what is missing; the skeptic is the only one that can argue for removing something,
+which is what keeps a run from ratcheting. `--no-skeptic` drops it.
+
+A `.rb-lite-reviewers` file replaces the panel wholesale — the skeptic is not
+injected into a panel you configured, so add your own if you want that
+counter-pressure. To override, drop the file in your repo root with one shell
+command per line (blank lines and `#` comments ignored):
 
 > **Upgrading from a version with the Gemini reviewer:** `$RUN_DIR/gemini-policy.toml`
 > is no longer generated, because it existed only for the default Gemini reviewer that
@@ -211,7 +221,7 @@ Reviewers run **concurrently**, each gets `BASE`, `RUN_DIR`, `ROUND`,
 an error/failure subtype. By default, each reviewer is wrapped in
 `timeout` (default 30m); a timed-out reviewer counts as a failed reviewer and is
 recorded in its per-reviewer markdown file, but does not abort the panel as long
-as at least one reviewer succeeds.
+as at least one **defect** reviewer succeeds.
 
 ### Reviewer contract
 
@@ -225,8 +235,12 @@ as at least one reviewer succeeds.
   partial or garbage). Findings detection ignores non-zero reviewers
   entirely. A linter that exits non-zero on findings must be wrapped:
   `mylinter || true`.
-- Panel succeeds with **at least one** exit-0 reviewer; failed reviewers
-  don't abort the run.
+- Panel succeeds with **at least one exit-0 defect reviewer**; failed reviewers
+  don't abort the run. In the built-in panel the skeptic succeeding *alone* is a
+  failed panel (exit `11`) — it is forbidden from reporting defects, so a clean
+  verdict carrying only its vote would mean nothing looked for bugs. Members of a
+  supplied `.rb-lite-reviewers` are opaque to rb-lite, so the plain at-least-one
+  rule still applies there.
 
 ## Customizing the implementer
 
@@ -290,10 +304,42 @@ custom `--implement-cmd` that uses `$PROMPT` receives these instructions too; a
 wrapper that ignores or replaces `$PROMPT` is responsible for equivalent
 challenge behavior.
 
-To add counter-pressure on the *reviewer* side too, put a skeptical reviewer in
-`.rb-lite-reviewers` that hunts over-specification (flagging what to CUT /
-SIMPLIFY / DEFER) alongside the bug-finding reviewers. See "Customizing the
-reviewer panel."
+Every round's decisions are recorded, not just its rejections: the implementer
+writes one line per finding in `challenges-round-$ROUND.md`, each beginning with
+`ACCEPTED`, `DECLINED`, or `DEFERRED`. rb-lite counts those lines and reports them
+per round in the log and in the exit summary (`findings_accepted`,
+`findings_declined`, `findings_deferred`, `rejections_total`,
+`rejections_by_round`).
+
+**Zero rejections is a red flag, and rb-lite says so.** After three consecutive
+rounds in which the implementer declined and deferred nothing while the panel kept
+reporting findings, the run log carries a one-time warning. Accepting every finding
+is how a bounded change grows into speculative hardening: each accepted finding
+adds mechanism, and that mechanism becomes the next round's review surface. The
+warning is a signal, not a stop — rb-lite keeps going.
+
+Counter-pressure on the *reviewer* side is on by default: the built-in panel
+includes a skeptical reviewer that hunts over-specification and tags findings
+`CUT` / `SIMPLIFY` / `DEFER`, so the panel is not composed solely of reviewers that
+push toward adding. Drop it with `--no-skeptic` for a small, already-bounded bead.
+A caller-supplied `.rb-lite-reviewers` panel is used exactly as written — the
+skeptic is never injected into it. See "Customizing the reviewer panel."
+
+### Budgets stop the run
+
+`--max-production-lines N` fails the run with exit `14` once added lines in the diff
+against `--base` exceed `N`. Test and fixture paths are excluded by default
+(`*.test`, `*_test.*`, `test/*`, `tests/*`, `fixtures/*` and their nested forms),
+because a budget that counts tests is met by deleting coverage. Paths that git C-quotes
+— TAB, newline, quote, backslash, or non-ASCII — are decoded before the globs are applied,
+so an excluded file with an unusual name is still excluded. Override the
+exclusions with `--budget-exclude GLOB` (repeatable); the first use *replaces* the
+built-in list rather than extending it.
+
+A budget is a stop, not a retry target. rb-lite reports the count, the limit, and
+the five largest contributing files, then exits — it never continues with a larger
+number. If the change genuinely cannot fit, that is a signal to re-shape the work
+or re-derive the baseline, not to raise `N`.
 
 ## Stop conditions and exit codes
 
@@ -306,6 +352,7 @@ reviewer panel."
 | `11` | `review_panel_failed` | Zero reviewers exited 0 |
 | `12` | `max_rounds_hit` | Hit `--max-rounds` before convergence |
 | `13` | `consensus_failure` | Hit `--max-noop-rounds` consecutive no-op rounds with reviewers still finding things |
+| `14` | `budget_exceeded` | Added production lines exceeded `--max-production-lines` |
 | `70` | `internal_error` | Internal invariant violation or unhandled shell failure |
 
 ## End-of-run JSON summary
@@ -314,7 +361,7 @@ Every exit (success or failure) prints one JSON object on a single line to
 stdout, as the **last** line of output. Pipe to `jq` to consume:
 
 ```json
-{"run_dir": "/path/.rb-lite/runs/...", "exit_code": 0, "status": "clean", "rounds": 3, "implementer_iterations": 5, "noop_rounds_streak": 0, "duration_secs": 712, "config": {"max_rounds": 25, "max_iters": 25, "max_noop_rounds": 2, "min_findings_severity": "P2", "implement_timeout_secs": 14400, "reviewer_timeout_secs": 1800}}
+{"run_dir": "/path/.rb-lite/runs/...", "exit_code": 0, "status": "clean", "rounds": 3, "implementer_iterations": 5, "noop_rounds_streak": 0, "findings_accepted": 9, "findings_declined": 2, "findings_deferred": 1, "rejections_total": 3, "rejections_by_round": [0,2,1], "production_lines_added": 184, "duration_secs": 712, "config": {"max_rounds": 25, "max_iters": 25, "max_noop_rounds": 2, "max_production_lines": 300, "min_findings_severity": "P2", "implement_timeout_secs": 14400, "reviewer_timeout_secs": 1800}}
 ```
 
 The human-readable `rb-lite clean after N round(s)` line is printed before
