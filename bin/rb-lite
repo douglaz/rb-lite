@@ -476,7 +476,10 @@ budget_rename_destination() {
     suffix=${path##*\}}
     middle=${path#*\{}
     middle=${middle%%\}*}
-    printf '%s%s%s' "$prefix" "${middle##* => }" "$suffix"
+    middle=${middle##* => }
+    # Collapse the doubled separator left behind when the destination component is empty.
+    [[ -z $middle && $prefix == */ && $suffix == /* ]] && suffix=${suffix#/}
+    printf '%s%s%s' "$prefix" "$middle" "$suffix"
   elif [[ $path == *" => "* ]]; then
     printf '%s' "${path##* => }"
   else
@@ -494,7 +497,14 @@ budget_rename_destination() {
 budget_eligible_lines() {
   local root=$1 base=$2
   local plus minus path numstat
-  numstat=$(cd "$root" && git diff --numstat "$base" -- "${filtered_pathspec[@]}" 2>/dev/null) || return 1
+  # core.quotePath=false: git otherwise C-quotes any path holding a non-ASCII byte
+  # (`"tests/t\303\253st.test"`), and the leading quote makes every exclusion glob miss —
+  # charging an excluded test file to the budget and hard-stopping a legitimate run.
+  # Residual, deliberately not handled: a path containing a literal `"` or `\` stays
+  # quoted even with this off. Such names are pathological, and the failure is loud
+  # (exit 14 naming the odd path) rather than silent, so `--numstat -z` is not worth it.
+  numstat=$(cd "$root" && git -c core.quotePath=false diff --numstat "$base" \
+    -- "${filtered_pathspec[@]}" 2>"$RUN_DIR/budget-diff-error.txt") || return 1
   while IFS=$'\t' read -r plus minus path; do
     [[ -z $plus || $plus == "-" ]] && continue
     path=$(budget_rename_destination "$path")
@@ -1190,7 +1200,7 @@ run_command() {
 
     if [[ -n $max_production_lines ]]; then
       production_lines=$(count_production_lines "$root" "$base") || die_with "$EXIT_ENV" \
-        "--max-production-lines needs a diffable --base, but 'git diff $base' failed; the budget would otherwise measure zero and never trip"
+        "--max-production-lines needs a diffable --base, but 'git diff $base' failed: $(tr '\n' ' ' <"$RUN_DIR/budget-diff-error.txt" 2>/dev/null | cut -c1-200); the budget would otherwise measure zero and never trip"
       SUMMARY_PRODUCTION_LINES=$production_lines
       log_msg "round $round production lines added: $production_lines (budget $max_production_lines)"
       if ((production_lines > max_production_lines)); then

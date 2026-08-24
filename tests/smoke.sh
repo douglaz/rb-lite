@@ -2688,6 +2688,88 @@ test_default_floor_does_not_warn_about_the_skeptic() {
   assert_file_not_contains "$run_dir/log.txt" 'filters out the skeptical reviewer'
 }
 
+test_budget_excludes_a_non_ascii_test_path() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/budget-quotepath"
+  # git's default core.quotePath=true C-quotes any path with a non-ASCII byte:
+  #   200\t0\t"tests/t\303\253st.test"
+  # The leading quote makes every exclusion glob miss, so the excluded test file is
+  # charged to the budget and stops a legitimate run — and a budget stop is by design
+  # not retryable, so the false trip is expensive.
+  # $'...' so the name is real UTF-8; a plain "\xc3" would be literal backslashes, which
+  # is a different (and far rarer) quoting case than the one being tested.
+  write_fake "$repo" fake-implementer '
+name="tests/$(printf "t\xc3\xabst.test")"
+if [[ ! -f $name ]]; then
+  mkdir -p tests
+  for i in $(seq 1 200); do printf "assert %s\n" "$i" >>"$name"; done
+  git add -- "$name"
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "non-ascii test path" --max-rounds 1 --max-iters 2 --base HEAD \
+    --max-production-lines 100 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 0 "$status" "a non-ascii test path stays excluded from the budget"
+  assert_summary_field /tmp/rb-lite-test.out production_lines_added 0
+}
+
+test_undiffable_base_error_names_the_git_cause() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/budget-why"
+  write_fake "$repo" fake-implementer 'printf "work\n" >work.txt'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "bad base cause" --max-rounds 1 --max-iters 2 \
+    --base origin/does-not-exist --max-production-lines 10 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 3 "$status" "an undiffable base is still an environment error"
+  # "git diff failed" without the reason leaves the operator guessing between an
+  # ambiguous ref, an unfetched remote, and a corrupt object.
+  assert_file_contains /tmp/rb-lite-test.err 'unknown revision|ambiguous argument|bad revision|not a valid object'
+}
+
+test_budget_exclude_matches_a_collapsed_rename_path() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/budget-collapse"
+  # git elides an emptied directory component as `vendor/{sub => }/lib.txt`. Naive
+  # concatenation yields `vendor//lib.txt`, which a wildcard-free exclusion misses --
+  # and the over-budget report then prints a path that is not in the repo.
+  write_fake "$repo" fake-implementer '
+if [[ ! -f vendor/lib.txt ]]; then
+  mkdir -p vendor/sub
+  for i in $(seq 1 300); do printf "vendored %s\n" "$i" >>vendor/sub/lib.txt; done
+  git add vendor/sub/lib.txt
+  git -c user.email=t@e -c user.name=T commit -qm addvendor
+  git mv vendor/sub/lib.txt vendor/lib.txt
+  for i in $(seq 1 300); do printf "more %s\n" "$i" >>vendor/lib.txt; done
+  git add -- vendor/lib.txt
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "collapsed rename" --max-rounds 1 --max-iters 2 --base HEAD \
+    --max-production-lines 100 --budget-exclude 'vendor/lib.txt' \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 0 "$status" "an exact exclusion matches a collapsed rename destination"
+  assert_summary_field /tmp/rb-lite-test.out production_lines_added 0
+}
+
 mkdir -p "$TMP_ROOT"
 require_timeout_with_kill_after
 
@@ -2783,5 +2865,8 @@ test_defect_reviewer_alone_still_clears_the_panel
 test_supplied_panel_keeps_the_at_least_one_rule
 test_p1_floor_warns_that_it_silences_the_skeptic
 test_default_floor_does_not_warn_about_the_skeptic
+test_budget_excludes_a_non_ascii_test_path
+test_undiffable_base_error_names_the_git_cause
+test_budget_exclude_matches_a_collapsed_rename_path
 
 printf 'ok - smoke tests passed\n'
