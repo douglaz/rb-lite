@@ -469,6 +469,23 @@ budget_path_excluded() {
 # git --numstat abbreviates a rename as `src/{old.txt => new.txt}` (brace form) when the
 # paths share a prefix or suffix, and as `old => new` otherwise. Charging the wrong path
 # means the exclusion globs miss it, so a renamed test file counts against the budget.
+# git C-quotes any path it cannot emit literally: TAB, newline, `"`, `\` — and non-ASCII
+# too unless core.quotePath is off. A quoted path begins with `"`, so every exclusion glob
+# misses it and an excluded test file gets charged to the budget, hard-stopping a run that
+# should have passed. Decode instead of matching the escaped text.
+budget_unquote_path() {
+  local path=$1 inner
+  [[ $path == '"'*'"' ]] || { printf '%s' "$path"; return 0; }
+  inner=${path:1:${#path}-2}
+  # `\"` before %b: printf leaves that escape alone, and a literal backslash is already
+  # `\\` here, so a trailing `\\` cannot be mistaken for an escaped quote.
+  inner=${inner//\\\"/\"}
+  # Octal is `\NNN` from git but `\0NNN` for %b. Unreachable while quotePath is forced
+  # off, kept so the decode is total rather than conditional on that flag staying set.
+  inner=$(printf '%s' "$inner" | sed -E 's/\\([0-7]{3})/\\0\1/g')
+  printf '%b' "$inner"
+}
+
 budget_rename_destination() {
   local path=$1 prefix suffix middle
   if [[ $path == *"{"*" => "*"}"* ]]; then
@@ -500,13 +517,11 @@ budget_eligible_lines() {
   # core.quotePath=false: git otherwise C-quotes any path holding a non-ASCII byte
   # (`"tests/t\303\253st.test"`), and the leading quote makes every exclusion glob miss —
   # charging an excluded test file to the budget and hard-stopping a legitimate run.
-  # Residual, deliberately not handled: a path containing a literal `"` or `\` stays
-  # quoted even with this off. Such names are pathological, and the failure is loud
-  # (exit 14 naming the odd path) rather than silent, so `--numstat -z` is not worth it.
   numstat=$(cd "$root" && git -c core.quotePath=false diff --numstat "$base" \
     -- "${filtered_pathspec[@]}" 2>"$RUN_DIR/budget-diff-error.txt") || return 1
   while IFS=$'\t' read -r plus minus path; do
     [[ -z $plus || $plus == "-" ]] && continue
+    path=$(budget_unquote_path "$path")
     path=$(budget_rename_destination "$path")
     budget_path_excluded "$path" && continue
     printf '%s\t%s\n' "$plus" "$path"

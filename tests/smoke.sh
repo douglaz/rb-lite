@@ -2770,6 +2770,35 @@ fi
   assert_summary_field /tmp/rb-lite-test.out production_lines_added 0
 }
 
+test_budget_excludes_c_quoted_special_paths() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/budget-quoted"
+  # git C-quotes any path it cannot emit literally -- TAB and newline here -- even with
+  # core.quotePath off. The leading quote defeats every exclusion glob, so an excluded
+  # test file gets charged and hard-stops a run that should pass.
+  write_fake "$repo" fake-implementer '
+tab=$(printf "tests/a\tb.test")
+nl=$(printf "tests/line\nbreak.test")
+if [[ ! -f $tab ]]; then
+  mkdir -p tests
+  for i in $(seq 1 200); do printf "assert %s\n" "$i" >>"$tab"; done
+  for i in $(seq 1 200); do printf "assert %s\n" "$i" >>"$nl"; done
+  git add -- "$tab" "$nl"
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "tab and newline test paths" --max-rounds 1 --max-iters 2 \
+    --base HEAD --max-production-lines 100 --implement-cmd 'fake-implementer' \
+    --run-dir "$run_dir" >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 0 "$status" "C-quoted test paths stay excluded from the budget"
+  assert_summary_field /tmp/rb-lite-test.out production_lines_added 0
+}
+
 mkdir -p "$TMP_ROOT"
 require_timeout_with_kill_after
 
@@ -2868,5 +2897,6 @@ test_default_floor_does_not_warn_about_the_skeptic
 test_budget_excludes_a_non_ascii_test_path
 test_undiffable_base_error_names_the_git_cause
 test_budget_exclude_matches_a_collapsed_rename_path
+test_budget_excludes_c_quoted_special_paths
 
 printf 'ok - smoke tests passed\n'

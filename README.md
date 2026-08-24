@@ -330,7 +330,9 @@ skeptic is never injected into it. See "Customizing the reviewer panel."
 `--max-production-lines N` fails the run with exit `14` once added lines in the diff
 against `--base` exceed `N`. Test and fixture paths are excluded by default
 (`*.test`, `*_test.*`, `test/*`, `tests/*`, `fixtures/*` and their nested forms),
-because a budget that counts tests is met by deleting coverage. Override the
+because a budget that counts tests is met by deleting coverage. Paths that git C-quotes
+— TAB, newline, quote, backslash, or non-ASCII — are decoded before the globs are applied,
+so an excluded file with an unusual name is still excluded. Override the
 exclusions with `--budget-exclude GLOB` (repeatable); the first use *replaces* the
 built-in list rather than extending it.
 
