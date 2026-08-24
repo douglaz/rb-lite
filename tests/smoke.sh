@@ -2279,9 +2279,10 @@ test_dispositions_are_counted_and_reported() {
   local repo run_dir
   repo=$(new_repo)
   run_dir="$repo/.rb-lite/dispositions"
-  # Every disposition form the prompt allows, plus decoys: a bare mention of the word in
-  # prose and a nested bullet. Only lines whose FIRST word is a disposition may count, or
-  # the totals silently inflate with every finding that discusses a rejection.
+  # Every disposition form the prompt allows (bare, bulleted, numbered, emphasised) plus
+  # two prose decoys that mention a disposition mid-sentence. Only a line whose first WORD
+  # is a disposition may count, or the totals inflate with every finding that discusses
+  # a rejection.
   write_fake "$repo" fake-implementer '
 mkdir -p "$RUN_DIR"
 cat >"$RUN_DIR/challenges-round-$ROUND.md" <<"EOF"
@@ -2293,6 +2294,7 @@ ACCEPTED reviewer asked for input validation on the id argument
 **DECLINED** reviewer wants a lock; the caller already serializes at the boundary
 
 The reviewer DECLINED to justify finding 3, so we asked for evidence.
+Nothing here was DEFERRED to a follow-up bead.
 EOF
 printf "work\n" >work.txt
 '
@@ -2351,10 +2353,15 @@ test_declining_a_finding_resets_the_warning_streak() {
   local repo run_dir status
   repo=$(new_repo)
   run_dir="$repo/.rb-lite/challenged"
+  # Decline in round 3 ONLY. Rounds 2 and 3 build a streak of 1 then reset it; rounds 4
+  # and 5 rebuild to 2. The threshold is 3, so a correct reset means no warning — whereas
+  # declining every round would pass even if the streak never incremented at all.
   write_fake "$repo" fake-implementer '
 mkdir -p "$RUN_DIR"
 printf "round\n" >"round-$ROUND.txt"
-printf "DECLINED over-specification: nothing breaks without it\n" >"$RUN_DIR/challenges-round-$ROUND.md"
+if [[ ${ROUND:-0} == 3 ]]; then
+  printf "DECLINED over-specification: nothing breaks without it\n" >"$RUN_DIR/challenges-round-$ROUND.md"
+fi
 '
   write_fake "$repo" fake-reviewer 'printf "P1 there is always one more edge case\n"'
   write_reviewers "$repo" fake-reviewer
@@ -2521,6 +2528,166 @@ test_reviewers_file_panel_is_not_given_a_skeptic() {
   assert_file_contains "$run_dir/log.txt" 'review panel starting with 1 reviewer\(s\)'
 }
 
+test_budget_refuses_an_undiffable_base() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/budget-bad-base"
+  write_fake "$repo" fake-implementer 'printf "work\n" >work.txt'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "bad base" --max-rounds 1 --max-iters 2 \
+    --base origin/does-not-exist --max-production-lines 10 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  # Silently measuring zero would leave the budget armed-looking and inert, which is the
+  # failure the budget exists to prevent. Refuse instead.
+  assert_equals 3 "$status" "an undiffable base with a budget is an environment error"
+  assert_file_contains /tmp/rb-lite-test.err 'needs a diffable [-][-]base'
+}
+
+test_budget_charges_a_rename_to_its_destination_path() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/budget-rename"
+  # git --numstat abbreviates this as `tests/{old.test => new.test}`. Parsing that as
+  # `new.test}` makes the tests/* exclusion miss it, and the run fails on a moved test.
+  write_fake "$repo" fake-implementer '
+if [[ ! -f tests/new.test ]]; then
+  mkdir -p tests
+  for i in $(seq 1 400); do printf "assert %s\n" "$i" >>tests/old.test; done
+  git add tests/old.test
+  git -c user.email=t@e -c user.name=T commit -qm addtest
+  git mv tests/old.test tests/new.test
+  for i in $(seq 1 200); do printf "assert extra %s\n" "$i" >>tests/new.test; done
+  # NOT `git add -A`: new_repo leaves bin/rb-lite and fakes/ untracked in the worktree,
+  # and staging those would charge ~1300 unrelated lines to the budget under test.
+  git add tests/new.test
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "renamed test file" --max-rounds 1 --max-iters 2 --base HEAD \
+    --max-production-lines 100 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 0 "$status" "a renamed test file stays excluded from the budget"
+  assert_summary_field /tmp/rb-lite-test.out production_lines_added 0
+}
+
+test_skeptic_alone_is_not_a_reviewed_panel() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/skeptic-only"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  # Both defect reviewers die; only the skeptic answers, and it says the change is minimal.
+  write_fake "$repo" codex 'printf "codex unavailable\n" >&2; exit 2'
+  write_fake "$repo" claude '
+if printf "%s" "$*" | grep -q "OVER-SPECIFICATION"; then
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"
+  exit 0
+fi
+printf "{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,\"result\":\"defect reviewer hit max turns\"}\n"
+'
+
+  status=0
+  run_rb_lite "$repo" run --task "skeptic only" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  # The skeptic is forbidden from reporting defects, so its lone success means nothing
+  # looked for bugs. Reporting `clean` here would be an unreviewed exit 0.
+  assert_equals 11 "$status" "a skeptic-only success is a failed panel"
+  assert_file_contains "$run_dir/log.txt" 'only the skeptical reviewer succeeded'
+  assert_last_stdout_summary /tmp/rb-lite-test.out review_panel_failed 11
+}
+
+test_defect_reviewer_alone_still_clears_the_panel() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/defect-only"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "codex unavailable\n" >&2; exit 2'
+  # Mirror image: the skeptic dies, one defect reviewer survives. That IS a reviewed
+  # change, and must still be able to go clean — the guard above must not over-reach.
+  write_fake "$repo" claude '
+if printf "%s" "$*" | grep -q "OVER-SPECIFICATION"; then
+  printf "skeptic unavailable\n" >&2
+  exit 2
+fi
+printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"
+'
+
+  status=0
+  run_rb_lite "$repo" run --task "defect only" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 0 "$status" "one surviving defect reviewer still clears"
+  assert_file_contains "$run_dir/log.txt" '1 of 3 reviewers succeeded'
+}
+
+test_supplied_panel_keeps_the_at_least_one_rule() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/supplied-panel"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" dead-reviewer 'printf "gone\n" >&2; exit 2'
+  write_fake "$repo" live-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" dead-reviewer live-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "supplied panel" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  # A supplied panel's members are opaque — rb-lite cannot know which is a skeptic — so
+  # the original at-least-one rule must be untouched there.
+  assert_equals 0 "$status" "a supplied panel is unaffected by the skeptic rule"
+}
+
+test_p1_floor_warns_that_it_silences_the_skeptic() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/floor-skeptic"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "codex says clean\n"'
+  write_fake "$repo" claude 'printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"'
+
+  status=0
+  run_rb_lite "$repo" run --task "raised floor" --max-rounds 1 --max-iters 1 \
+    --min-findings-severity P1 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  # The skeptic tags every finding P2, so a P1 floor filters it out entirely — and the
+  # skills advise raising the floor exactly when over-building starts. Silence there
+  # would remove the panel's only counter-pressure with no tell.
+  assert_equals 0 "$status" "a raised floor still runs"
+  assert_file_contains "$run_dir/log.txt" 'filters out the skeptical reviewer'
+}
+
+test_default_floor_does_not_warn_about_the_skeptic() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/floor-default"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "codex says clean\n"'
+  write_fake "$repo" claude 'printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"'
+
+  run_rb_lite "$repo" run --task "default floor" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_not_contains "$run_dir/log.txt" 'filters out the skeptical reviewer'
+}
+
 mkdir -p "$TMP_ROOT"
 require_timeout_with_kill_after
 
@@ -2609,5 +2776,12 @@ test_no_budget_flag_means_no_limit
 test_invalid_production_budget_is_usage_error
 test_no_skeptic_returns_the_two_reviewer_panel
 test_reviewers_file_panel_is_not_given_a_skeptic
+test_budget_refuses_an_undiffable_base
+test_budget_charges_a_rename_to_its_destination_path
+test_skeptic_alone_is_not_a_reviewed_panel
+test_defect_reviewer_alone_still_clears_the_panel
+test_supplied_panel_keeps_the_at_least_one_rule
+test_p1_floor_warns_that_it_silences_the_skeptic
+test_default_floor_does_not_warn_about_the_skeptic
 
 printf 'ok - smoke tests passed\n'

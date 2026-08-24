@@ -190,18 +190,22 @@ the old strict P3 behavior.
 treat that as too old rather than assuming.
 
 Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
-two-reviewer panel with both models pinned:
+three-reviewer panel with all models pinned — two defect reviewers plus a skeptic
+that reports over-specification only (CUT/SIMPLIFY/DEFER), dropped by --no-skeptic:
   codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
-  set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<P0..P3 review prompt>" --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit,Bash" | jq -er 'if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'
+  set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<P0..P3 review prompt>" --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit,Bash" | jq -er '<result extractor>'
+  set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<over-specification prompt>" --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep" --disallowedTools "Edit,Write,NotebookEdit,Bash,WebSearch,WebFetch" | jq -er '<result extractor>'
 codex, claude, and jq must be on PATH. The default reviewer pins gpt-5.6-sol, so
 your codex CLI must be able to select it (verified on 0.146.0). If it cannot,
-that reviewer fails and the panel proceeds on the remaining one — see the
-"N of 2 reviewers succeeded" line in the run log. jq extracts the default claude reviewer's
+that reviewer fails and the panel proceeds on the remaining ones — see the
+"N of 3 reviewers succeeded" line in the run log. jq extracts the default claude reviewer's
 final result event from claude --output-format stream-json and fails if claude
 reports is_error or an error/failure subtype. Override the panel by writing
 .rb-lite-reviewers.
-The panel succeeds as long as at least one reviewer exits 0; failed reviewers
-are noted in their per-reviewer markdown files but do not abort the run.
+The panel succeeds as long as at least one DEFECT reviewer exits 0; failed reviewers
+are noted in their per-reviewer markdown files but do not abort the run. The skeptic
+succeeding alone is a failed panel: it is forbidden from reporting defects, so a clean
+verdict carrying only its vote would mean nothing looked for bugs.
 
 Implementers and reviewers run with stdin closed. Per-reviewer markdown files
 (one per reviewer, review-round-N-K.md) are passed to the implementer so it can
@@ -440,8 +444,9 @@ count_dispositions() {
   ROUND_DECLINED=0
   ROUND_DEFERRED=0
   [[ -f $file ]] || return 0
-  # Leading list markers and emphasis are common; the disposition must still be the
-  # first word so a finding that merely mentions "declined" in prose cannot be counted.
+  # A list marker, number, or emphasis may precede the disposition (including on an
+  # indented sub-bullet), but the disposition must be the first WORD of the line — a
+  # finding that merely mentions "declined" in its prose must not be counted.
   while read -r disposition; do
     case $disposition in
       ACCEPTED) ((ROUND_ACCEPTED += 1)) ;;
@@ -461,18 +466,51 @@ budget_path_excluded() {
   return 1
 }
 
+# git --numstat abbreviates a rename as `src/{old.txt => new.txt}` (brace form) when the
+# paths share a prefix or suffix, and as `old => new` otherwise. Charging the wrong path
+# means the exclusion globs miss it, so a renamed test file counts against the budget.
+budget_rename_destination() {
+  local path=$1 prefix suffix middle
+  if [[ $path == *"{"*" => "*"}"* ]]; then
+    prefix=${path%%\{*}
+    suffix=${path##*\}}
+    middle=${path#*\{}
+    middle=${middle%%\}*}
+    printf '%s%s%s' "$prefix" "${middle##* => }" "$suffix"
+  elif [[ $path == *" => "* ]]; then
+    printf '%s' "${path##* => }"
+  else
+    printf '%s' "$path"
+  fi
+}
+
 # Added lines in the diff against base, excluding orchestration state and budget-excluded
 # paths. Binary files report "-" for both counts and contribute nothing.
+# Returns nonzero when the diff cannot be computed. That must not be swallowed: a budget
+# that silently measures zero against an unresolvable base is a guard that does nothing,
+# which is the exact failure this whole feature exists to prevent.
+# Emits one `<added>\t<path>` line per budget-eligible file. Both the total and the
+# over-budget report read this, so they can never disagree about what counts.
+budget_eligible_lines() {
+  local root=$1 base=$2
+  local plus minus path numstat
+  numstat=$(cd "$root" && git diff --numstat "$base" -- "${filtered_pathspec[@]}" 2>/dev/null) || return 1
+  while IFS=$'\t' read -r plus minus path; do
+    [[ -z $plus || $plus == "-" ]] && continue
+    path=$(budget_rename_destination "$path")
+    budget_path_excluded "$path" && continue
+    printf '%s\t%s\n' "$plus" "$path"
+  done <<<"$numstat"
+}
+
 count_production_lines() {
   local root=$1 base=$2
-  local added=0 plus minus path
-  while IFS=$'\t' read -r plus minus path; do
-    [[ $plus == "-" ]] && continue
-    # Renames render as "old => new"; charge the destination path.
-    [[ $path == *" => "* ]] && path=${path##* => }
-    budget_path_excluded "$path" && continue
+  local added=0 plus path eligible
+  eligible=$(budget_eligible_lines "$root" "$base") || return 1
+  while IFS=$'\t' read -r plus path; do
+    [[ -z $plus ]] && continue
     added=$((added + plus))
-  done < <(cd "$root" && git diff --numstat "$base" -- "${filtered_pathspec[@]}" 2>/dev/null)
+  done <<<"$eligible"
   printf '%s' "$added"
 }
 
@@ -690,6 +728,7 @@ run_implementer_loop() {
 load_reviewers() {
   local reviewers_file=$1
   REVIEWERS=()
+  SKEPTIC_REVIEWER_INDEX=
 
   if [[ -f $reviewers_file ]]; then
     local line
@@ -714,6 +753,12 @@ load_reviewers() {
       'set -o pipefail; { git diff "$BASE" || printf "%s\\n" "rb-lite: could not compute a diff against $BASE (see the error above); the reviewer cannot see the change set"; } >"$RUN_DIR/reviewer-diff-round-$ROUND.patch" 2>&1; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. The complete diff is in $RUN_DIR/reviewer-diff-round-$ROUND.patch — read that file first, then read any source it touches to verify claims. If that file contains an rb-lite error instead of a diff, report exactly that as a P1 and do not claim the change is clean. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). Before asserting that the diff violates or overstates an invariant, or any claim about behavior in code the diff does not show, VERIFY it by reading that code and cite file:line; do not infer a cross-file property from the diff alone, and if you cannot verify such a claim mark it a QUESTION not a finding. If there are no actionable findings, output exactly: No findings. Do not modify any files." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit,Bash" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'\'''
     )
     if [[ ${NO_SKEPTIC:-0} != 1 ]]; then
+      # 1-based index of the skeptic in the built-in panel. It is recorded because the
+      # skeptic is forbidden from reporting defects, so its success alone is NOT a
+      # reviewed change: a panel where both defect reviewers died and only the skeptic
+      # answered would otherwise report `clean` with nothing having looked for bugs.
+      # Only ever set for the built-in panel — a supplied file's members are opaque.
+      SKEPTIC_REVIEWER_INDEX=$(( ${#REVIEWERS[@]} + 1 ))
       REVIEWERS+=(
         'set -o pipefail; { git diff "$BASE" || printf "%s\\n" "rb-lite: could not compute a diff against $BASE (see the error above); the reviewer cannot see the change set"; } >"$RUN_DIR/skeptic-diff-round-$ROUND.patch" 2>&1; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE for OVER-SPECIFICATION, not for defects. The complete diff is in $RUN_DIR/skeptic-diff-round-$ROUND.patch — read that file first, then read any source it touches. If that file contains an rb-lite error instead of a diff, report exactly that as a P1 and do not claim the change is clean. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/. Flag any mechanism, handling, config, abstraction, or defensive check that is NOT required for correctness, security, or data safety and could be cut, simplified, or deferred. For each, state what it is, what already covers the case, and your recommendation. Judge against the change'\''s stated goal: a guard against a caller the threat model does not include is over-specification even when the guard is correct. Tag each finding on its own line with one of P2: CUT, P2: SIMPLIFY, or P2: DEFER. Do not report missing behavior, bugs, or style — other reviewers own those. If the change is already minimal for its goal, output exactly: No findings. Do not modify any files." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep" --disallowedTools "Edit,Write,NotebookEdit,Bash,WebSearch,WebFetch" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "skeptic reviewer returned is_error") else (.result // empty) end else empty end'\'''
       )
@@ -835,6 +880,16 @@ run_review_panel() {
 
   if (( succeeded == 0 )); then
     log_msg "round $round review panel failed: 0 of $count reviewers succeeded (last exit $failed)"
+    REVIEW_PANEL_FAILURE_EXIT=$failed
+    return 1
+  fi
+
+  # A clean verdict has to come from something that was looking for defects. The skeptic
+  # only reports over-specification, so if it is the sole survivor the change has not been
+  # reviewed at all — treat that as a failed panel rather than a quiet exit 0.
+  if [[ -n ${SKEPTIC_REVIEWER_INDEX:-} ]] && (( succeeded == 1 )) \
+     && (( ${REVIEWER_RCS[$((SKEPTIC_REVIEWER_INDEX - 1))]:-1} == 0 )); then
+    log_msg "round $round review panel failed: only the skeptical reviewer succeeded, and it does not report defects (last exit $failed)"
     REVIEW_PANEL_FAILURE_EXIT=$failed
     return 1
   fi
@@ -1083,6 +1138,13 @@ run_command() {
   if [[ -n $max_production_lines ]]; then
     log_msg "production line budget: $max_production_lines (excluding: ${BUDGET_EXCLUDES[*]})"
   fi
+  # The skeptic tags every finding P2 by construction, so a P0/P1 floor filters it out
+  # entirely and the panel silently loses its only counter-pressure. Say so: raising the
+  # floor is advised precisely when over-building starts, which is when this matters most.
+  if [[ ${NO_SKEPTIC:-0} != 1 && ! -f $reviewers_file ]] \
+     && [[ $min_findings_severity == P0 || $min_findings_severity == P1 ]]; then
+    log_msg "WARNING: --min-findings-severity $min_findings_severity filters out the skeptical reviewer, which tags every finding P2. Its CUT/SIMPLIFY/DEFER findings cannot trigger a round or block a clean verdict at this floor, so the panel has no counter-pressure against over-building. Use P2 to keep it, or --no-skeptic to drop it deliberately."
+  fi
   [[ -z $implement_timeout ]] || log_msg "implementer iteration timeout: ${implement_timeout}s"
   [[ -z $reviewer_timeout ]] || log_msg "reviewer timeout: ${reviewer_timeout}s"
 
@@ -1127,7 +1189,8 @@ run_command() {
     fi
 
     if [[ -n $max_production_lines ]]; then
-      production_lines=$(count_production_lines "$root" "$base")
+      production_lines=$(count_production_lines "$root" "$base") || die_with "$EXIT_ENV" \
+        "--max-production-lines needs a diffable --base, but 'git diff $base' failed; the budget would otherwise measure zero and never trip"
       SUMMARY_PRODUCTION_LINES=$production_lines
       log_msg "round $round production lines added: $production_lines (budget $max_production_lines)"
       if ((production_lines > max_production_lines)); then
@@ -1135,13 +1198,9 @@ run_command() {
         log_msg "round $round exceeded the production budget; stopping"
         printf 'rb-lite production budget exceeded: %s added lines against a budget of %s. Largest contributors:\n' \
           "$production_lines" "$max_production_lines"
-        (cd "$root" && git diff --numstat "$base" -- "${filtered_pathspec[@]}" 2>/dev/null) \
-          | while IFS=$'\t' read -r plus _minus path; do
-              [[ $plus == "-" ]] && continue
-              [[ $path == *" => "* ]] && path=${path##* => }
-              budget_path_excluded "$path" && continue
-              printf '%s\t%s\n' "$plus" "$path"
-            done | sort -rn | head -n 5
+        # `|| true`: under pipefail with the ERR trap armed, `sort` taking SIGPIPE after
+        # `head` exits would turn a budget stop into internal_error.
+        { budget_eligible_lines "$root" "$base" | sort -rn | head -n 5; } || true
         printf 'A budget is a stop, not a retry target: re-shape the change or re-derive the baseline. Artifacts: %s\n' "$RUN_DIR"
         exit "$EXIT_BUDGET"
       fi
@@ -1229,6 +1288,7 @@ SUMMARY_DEFERRED_TOTAL=0
 SUMMARY_PRODUCTION_LINES=0
 SUMMARY_MAX_PRODUCTION_LINES=
 NO_SKEPTIC=0
+SKEPTIC_REVIEWER_INDEX=
 ROUND_ACCEPTED=0
 ROUND_DECLINED=0
 ROUND_DEFERRED=0

@@ -5,7 +5,8 @@
 A small Bash CLI that drives an **implement → review** loop using an explicit
 `claude`/`codex` implementer preset, a preset cycle, or a custom command. It
 uses codex and [`claude`](https://docs.anthropic.com/claude/docs/claude-code) as
-the default reviewer panel, with both models pinned. Repeatedly invokes the
+the default reviewer panel — two defect reviewers plus a skeptic that hunts
+over-specification — with all models pinned. Repeatedly invokes the
 implementer until the git diff stabilizes, runs the reviewer panel in parallel, feeds
 P0/P1/P2 findings back into the implementer, and stops when the panel is clean,
 the implementer refuses to act on remaining findings, or a budget cap is hit.
@@ -29,7 +30,7 @@ That single command:
 1. Builds rb-lite from source (cached after first run)
 2. Spawns the selected implementer preset or preset cycle in your repo's
    working tree
-3. Loops implementer ↔ panel-reviewer (codex + claude)
+3. Loops implementer ↔ panel-reviewer (codex + claude + a claude skeptic)
 4. Stops when the panel reports no actionable findings, exits clean
 
 Artifacts land in `.rb-lite/runs/<timestamp>-<pid>/`.
@@ -102,18 +103,18 @@ You can override or replace either side — see "Configuration" below.
                                              │
                  ┌───────────────────────────▼───────────────────────┐
                  │ Review panel (concurrent)                         │
-                 │  • codex review --base X                          │
-                 │  • claude -p "<prompt>" --output-format stream-json │
-                 │    --verbose | jq -er '<extract result event;     │
-                 │    fail on Claude error>'                         │
+                 │  • codex review --base X          (defects)       │
+                 │  • claude -p "<defect prompt>" | jq -er '<result>' │
+                 │  • claude -p "<over-spec prompt>" (skeptic)       │
                  │  • each writes review-round-N-K.md                │
                  └───────────────────────────┬───────────────────────┘
                                              │
                                              ▼
         clean (no P0/P1/P2)?  ──────► EXIT 0
-        all reviewers failed?  ─────► EXIT 11
+        no defect reviewer survived? ► EXIT 11
         max rounds hit?  ───────────► EXIT 12
         2 no-op rounds + findings? ─► EXIT 13 (consensus failure)
+        over --max-production-lines? ► EXIT 14 (budget exceeded)
         otherwise: feed reviews to implementer, next round
 ```
 
@@ -142,7 +143,10 @@ Common flags (full list: `rb-lite --help`):
 | `--reviewer-timeout SECS` | 1800 | SIGTERM/SIGKILL each reviewer if it runs longer; empty disables |
 | `--implementer NAME[,NAME...]` | none | Select an implementer preset (`claude` or `codex`) or comma-separated preset cycle; required unless `--implement-cmd` or env equivalent is set |
 | `--implement-cmd CMD` | none | Raw implementer subprocess escape hatch; takes precedence over presets |
-| `--reviewers-file PATH` | `.rb-lite-reviewers` | Custom reviewer panel (one shell command per line) |
+| `--reviewers-file PATH` | `.rb-lite-reviewers` | Custom reviewer panel (one shell command per line); replaces the built-in panel entirely, skeptic included |
+| `--no-skeptic` | off | Drop the skeptical reviewer from the built-in panel |
+| `--max-production-lines N` | none | Exit `14` once added lines exceed N (test/fixture paths excluded) |
+| `--budget-exclude GLOB` | test/fixture globs | Path excluded from the budget count; first use replaces the built-in list |
 | `--branch NAME` | none | `git switch -c NAME` before starting |
 | `--run-dir PATH` | `.rb-lite/runs/<id>` | Where to store run artifacts |
 
@@ -217,7 +221,7 @@ Reviewers run **concurrently**, each gets `BASE`, `RUN_DIR`, `ROUND`,
 an error/failure subtype. By default, each reviewer is wrapped in
 `timeout` (default 30m); a timed-out reviewer counts as a failed reviewer and is
 recorded in its per-reviewer markdown file, but does not abort the panel as long
-as at least one reviewer succeeds.
+as at least one **defect** reviewer succeeds.
 
 ### Reviewer contract
 
@@ -231,8 +235,12 @@ as at least one reviewer succeeds.
   partial or garbage). Findings detection ignores non-zero reviewers
   entirely. A linter that exits non-zero on findings must be wrapped:
   `mylinter || true`.
-- Panel succeeds with **at least one** exit-0 reviewer; failed reviewers
-  don't abort the run.
+- Panel succeeds with **at least one exit-0 defect reviewer**; failed reviewers
+  don't abort the run. In the built-in panel the skeptic succeeding *alone* is a
+  failed panel (exit `11`) — it is forbidden from reporting defects, so a clean
+  verdict carrying only its vote would mean nothing looked for bugs. Members of a
+  supplied `.rb-lite-reviewers` are opaque to rb-lite, so the plain at-least-one
+  rule still applies there.
 
 ## Customizing the implementer
 
