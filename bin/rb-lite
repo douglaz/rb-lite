@@ -5,7 +5,7 @@ PROGRAM=${0##*/}
 # Bumped deliberately, and reported by `--version` so a caller can require a floor.
 # A build without this command predates it; callers treat `unknown command: --version`
 # as "too old" rather than assuming a capability is present.
-RB_LITE_VERSION=0.2.0
+RB_LITE_VERSION=0.3.0
 readonly RB_LITE_VERSION
 TIMEOUT_KILL_AFTER=5s
 readonly TIMEOUT_KILL_AFTER
@@ -15,7 +15,26 @@ readonly EXIT_IMPLEMENTER=10
 readonly EXIT_REVIEW_PANEL=11
 readonly EXIT_MAX_ROUNDS=12
 readonly EXIT_CONSENSUS=13
+readonly EXIT_BUDGET=14
 readonly EXIT_INTERNAL=70
+
+# Rounds of zero declined/deferred findings tolerated before warning once. A panel that
+# keeps reporting while the implementer accepts everything is the ratchet signature: each
+# accepted finding adds mechanism, and the mechanism becomes the next round's review surface.
+readonly UNCHALLENGED_ROUNDS_WARN=3
+
+# Paths excluded from the --max-production-lines count by default. A budget that counts
+# tests is met by deleting coverage, which is the opposite of what the budget protects.
+DEFAULT_BUDGET_EXCLUDES=(
+  '*.test'
+  '*_test.*'
+  'test/*'
+  'tests/*'
+  'fixtures/*'
+  '*/test/*'
+  '*/tests/*'
+  '*/fixtures/*'
+)
 
 unexpected_error() {
   local rc=$? line=${BASH_LINENO[0]:-unknown}
@@ -44,7 +63,7 @@ if (( ${#_rb_scrub_env[@]} > 0 )); then
 fi
 unset -v _rb_scrub_env
 
-DEFAULT_PROMPT=$'Read AGENTS.md if present. If review files are provided, address the findings\nin those reviews. Treat each finding as a hypothesis you may challenge, not an\norder. If a finding is a false positive, or is over-specification (it adds\nmechanism, hardening, config, or abstraction that no real correctness, security,\nor data-loss requirement needs), do NOT implement it. Instead record a brief\nreasoned rejection (the finding plus why) in a file named\nchallenges-round-$ROUND.md inside the run directory $RUN_DIR. Apply the\nover-specification test before adding anything: if you simply do not do it, does a\nreal correctness/security/data-loss problem break, or only an operational\ninconvenience? Make the smallest correct change that closes a real problem; do not\nadd speculative hardening beyond what the task needs. A documented rejection is a\nvalid outcome.\nNever weaken, invert, or delete a correctness, safety, or invariant comment or\nassertion just to satisfy a review finding. A claim about behavior is only as\ntrustworthy as the code behind it, so when a finding says an invariant comment is\nwrong, VERIFY it against the actual code and cite file:line before you touch it,\nthen either fix the code and the comment together or refute the finding with that\nevidence and keep the comment. Editing a correctness claim carries the same\nevidence burden as a behavior change; it is not a cheap doc fix. Be especially\nwary of findings about invariants whose guarantee lives in code the diff does not\nshow (often an unchanged file).\nStage any new source files you create with git add so they appear in the reviewed\ndiff (git diff against the base ref does not list untracked files); staging a\ncreated source file is ordinary git usage, not editing of .git internals.\nOtherwise implement the requested work. Stop when no code or test\nchanges are needed.'
+DEFAULT_PROMPT=$'Read AGENTS.md if present. If review files are provided, address the findings\nin those reviews. Treat each finding as a hypothesis you may challenge, not an\norder. If a finding is a false positive, or is over-specification (it adds\nmechanism, hardening, config, or abstraction that no real correctness, security,\nor data-loss requirement needs), do NOT implement it. Record what you decided about\nEVERY finding you received in a file named challenges-round-$ROUND.md inside the run\ndirectory $RUN_DIR: one line per finding, each line beginning with exactly one of\nACCEPTED, DECLINED, or DEFERRED, then the finding, then \xe2\x80\x94 for DECLINED and DEFERRED \xe2\x80\x94\nyour reason. Findings you implemented get an ACCEPTED line; the file is the round\x27s\ndecision record, not just a rejection list. Apply the\nover-specification test before adding anything: if you simply do not do it, does a\nreal correctness/security/data-loss problem break, or only an operational\ninconvenience? Make the smallest correct change that closes a real problem; do not\nadd speculative hardening beyond what the task needs. A documented rejection is a\nvalid outcome.\nNever weaken, invert, or delete a correctness, safety, or invariant comment or\nassertion just to satisfy a review finding. A claim about behavior is only as\ntrustworthy as the code behind it, so when a finding says an invariant comment is\nwrong, VERIFY it against the actual code and cite file:line before you touch it,\nthen either fix the code and the comment together or refute the finding with that\nevidence and keep the comment. Editing a correctness claim carries the same\nevidence burden as a behavior change; it is not a cheap doc fix. Be especially\nwary of findings about invariants whose guarantee lives in code the diff does not\nshow (often an unchanged file).\nStage any new source files you create with git add so they appear in the reviewed\ndiff (git diff against the base ref does not list untracked files); staging a\ncreated source file is ordinary git usage, not editing of .git internals.\nOtherwise implement the requested work. Stop when no code or test\nchanges are needed.'
 TRANSIENT_OUTPUT_PATTERN='"api_error_status"[[:space:]]*:[[:space:]]*(408|425|429|500|502|503|504|522|529)|"(error|type|error_name)"[[:space:]]*:[[:space:]]*"(rate_?limit(_error)?|overloaded(_error)?|api_error|server_error)"|rate[ _-]?limit|temporarily limiting requests|too many requests|overloaded|service unavailable|bad gateway|gateway time-?out|connection (error|reset|refused|closed|timed out)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|stream (disconnected|error)|(internal )?server (error|had an error)|api error[^[:digit:]]{0,8}(408|425|429|500|502|503|504|529)|http[ /]?(408|425|429|500|502|503|504|522|529)|status[ _-]?code[^[:digit:]]{0,4}(408|425|429|500|502|503|504|522|529)|cloudflare[^[:digit:]]{0,40}522|522[^[:alpha:]]{0,40}cloudflare|"(status|error_code)"[[:space:]]*:[[:space:]]*522.*"cloudflare_error"[[:space:]]*:[[:space:]]*true|"cloudflare_error"[[:space:]]*:[[:space:]]*true.*"(status|error_code)"[[:space:]]*:[[:space:]]*522|"(error|type|error_name)"[[:space:]]*:[[:space:]]*"connection_timeout".*"cloudflare_error"[[:space:]]*:[[:space:]]*true|"cloudflare_error"[[:space:]]*:[[:space:]]*true.*"(error|type|error_name)"[[:space:]]*:[[:space:]]*"connection_timeout"|\b529\b'
 RETRY_AFTER_PATTERN='"retry[_-]after"[[:space:]]*:[[:space:]]*"?[0-9]+"?|retry-after[[:space:]]*:[[:space:]]*[0-9]+'
 readonly TRANSIENT_OUTPUT_PATTERN RETRY_AFTER_PATTERN
@@ -91,6 +110,17 @@ Options:
                           Minimum reviewer finding severity that triggers another round.
                           One of P0, P1, P2, P3. Default:
                           RB_LITE_MIN_FINDINGS_SEVERITY or P2.
+  --max-production-lines N
+                          Stop with exit 14 when added lines in the diff against
+                          --base exceed N, excluding --budget-exclude paths. A
+                          budget is a stop, not a retry target: rb-lite reports
+                          and exits rather than continuing with a larger number.
+                          Default: RB_LITE_MAX_PRODUCTION_LINES or unset (no limit).
+  --budget-exclude GLOB   Path glob excluded from --max-production-lines. Repeatable.
+                          Replaces the built-in defaults (test/fixture paths) on
+                          first use, so pass every glob you want when overriding.
+  --no-skeptic            Drop the skeptical reviewer from the built-in panel.
+                          No effect when a reviewers file supplies the panel.
   --run-dir PATH          Store run artifacts in PATH. Default: RB_LITE_RUN_DIR or .rb-lite/runs/<id>.
   --branch NAME           Create and switch to NAME before running.
   -h, --help              Show this help.
@@ -100,6 +130,8 @@ Environment:
   RB_LITE_BASE            Default review base.
   RB_LITE_MAX_ROUNDS      Default maximum review rounds.
   RB_LITE_MAX_NOOP_ROUNDS Default consecutive no-op rounds before stopping.
+  RB_LITE_MAX_PRODUCTION_LINES
+                          Default production line budget; unset means no limit.
   RB_LITE_MAX_ITERS       Default maximum implementer iterations per round.
   RB_LITE_IMPLEMENT_TIMEOUT
                           Default implementer iteration timeout in seconds.
@@ -198,6 +230,7 @@ Exit codes:
   11  Review panel failed because zero reviewers exited 0.
   12  Max rounds hit before clean review.
   13  Consensus failure after repeated no-op implementer rounds with findings.
+  14  Production line budget exceeded (--max-production-lines).
   70  Internal rb-lite invariant or unexpected shell failure.
 EOF
 }
@@ -274,6 +307,7 @@ json_escape() {
 
 emit_exit_summary() {
   local rc=$1 now duration run_dir_json implement_timeout_json reviewer_timeout_json status min_severity_json
+  local rejections_by_round_json max_production_lines_json
   trap - ERR
   set +e
   [[ ${SUMMARY_ENABLED:-0} == 1 ]] || return 0
@@ -288,6 +322,7 @@ emit_exit_summary() {
       "$EXIT_REVIEW_PANEL") status=review_panel_failed ;;
       "$EXIT_MAX_ROUNDS") status=max_rounds_hit ;;
       "$EXIT_CONSENSUS") status=consensus_failure ;;
+      "$EXIT_BUDGET") status=budget_exceeded ;;
       *) status=internal_error ;;
     esac
   fi
@@ -307,10 +342,16 @@ emit_exit_summary() {
   [[ -z ${SUMMARY_REVIEWER_TIMEOUT_SECS:-} ]] || reviewer_timeout_json=$SUMMARY_REVIEWER_TIMEOUT_SECS
 
   min_severity_json=$(json_escape "${SUMMARY_MIN_FINDINGS_SEVERITY:-P2}")
-  printf '{"run_dir": %s, "exit_code": %s, "status": "%s", "rounds": %s, "implementer_iterations": %s, "noop_rounds_streak": %s, "duration_secs": %s, "config": {"max_rounds": %s, "max_iters": %s, "max_noop_rounds": %s, "min_findings_severity": "%s", "implement_timeout_secs": %s, "reviewer_timeout_secs": %s}}\n' \
+  rejections_by_round_json=$(IFS=,; printf '[%s]' "${SUMMARY_REJECTIONS_BY_ROUND[*]:-}")
+  max_production_lines_json=null
+  [[ -z ${SUMMARY_MAX_PRODUCTION_LINES:-} ]] || max_production_lines_json=$SUMMARY_MAX_PRODUCTION_LINES
+  printf '{"run_dir": %s, "exit_code": %s, "status": "%s", "rounds": %s, "implementer_iterations": %s, "noop_rounds_streak": %s, "findings_accepted": %s, "findings_declined": %s, "findings_deferred": %s, "rejections_total": %s, "rejections_by_round": %s, "production_lines_added": %s, "duration_secs": %s, "config": {"max_rounds": %s, "max_iters": %s, "max_noop_rounds": %s, "max_production_lines": %s, "min_findings_severity": "%s", "implement_timeout_secs": %s, "reviewer_timeout_secs": %s}}\n' \
     "$run_dir_json" "$rc" "$status" "${SUMMARY_ROUNDS:-0}" "${SUMMARY_IMPLEMENTER_ITERATIONS:-0}" \
-    "${SUMMARY_NOOP_ROUNDS_STREAK:-0}" "$duration" "${SUMMARY_MAX_ROUNDS:-25}" \
-    "${SUMMARY_MAX_ITERS:-25}" "${SUMMARY_MAX_NOOP_ROUNDS:-2}" "$min_severity_json" "$implement_timeout_json" "$reviewer_timeout_json"
+    "${SUMMARY_NOOP_ROUNDS_STREAK:-0}" "${SUMMARY_ACCEPTED_TOTAL:-0}" "${SUMMARY_DECLINED_TOTAL:-0}" \
+    "${SUMMARY_DEFERRED_TOTAL:-0}" "$((${SUMMARY_DECLINED_TOTAL:-0} + ${SUMMARY_DEFERRED_TOTAL:-0}))" \
+    "$rejections_by_round_json" "${SUMMARY_PRODUCTION_LINES:-0}" "$duration" "${SUMMARY_MAX_ROUNDS:-25}" \
+    "${SUMMARY_MAX_ITERS:-25}" "${SUMMARY_MAX_NOOP_ROUNDS:-2}" "$max_production_lines_json" \
+    "$min_severity_json" "$implement_timeout_json" "$reviewer_timeout_json"
 }
 
 handle_signal() {
@@ -386,6 +427,53 @@ fingerprint_git_state() {
           done
     } | sha256sum | awk '{print $1}'
   )
+}
+
+# Count ACCEPTED/DECLINED/DEFERRED lines the implementer recorded for this round.
+# Sets ROUND_ACCEPTED/ROUND_DECLINED/ROUND_DEFERRED. A missing file is zero of each,
+# not an error: the round may legitimately have received no findings.
+count_dispositions() {
+  local round=$1
+  local file="$RUN_DIR/challenges-round-${round}.md"
+  local disposition
+  ROUND_ACCEPTED=0
+  ROUND_DECLINED=0
+  ROUND_DEFERRED=0
+  [[ -f $file ]] || return 0
+  # Leading list markers and emphasis are common; the disposition must still be the
+  # first word so a finding that merely mentions "declined" in prose cannot be counted.
+  while read -r disposition; do
+    case $disposition in
+      ACCEPTED) ((ROUND_ACCEPTED += 1)) ;;
+      DECLINED) ((ROUND_DECLINED += 1)) ;;
+      DEFERRED) ((ROUND_DEFERRED += 1)) ;;
+    esac
+  done < <(sed -E 's/^[[:space:]]*([-*+][[:space:]]*|[0-9]+[.)][[:space:]]*)?[*_`]*(ACCEPTED|DECLINED|DEFERRED)\b.*/\2/;t;d' "$file")
+  return 0
+}
+
+budget_path_excluded() {
+  local path=$1 glob
+  for glob in "${BUDGET_EXCLUDES[@]}"; do
+    # shellcheck disable=SC2053 # glob on the right is intentional
+    [[ $path == $glob ]] && return 0
+  done
+  return 1
+}
+
+# Added lines in the diff against base, excluding orchestration state and budget-excluded
+# paths. Binary files report "-" for both counts and contribute nothing.
+count_production_lines() {
+  local root=$1 base=$2
+  local added=0 plus minus path
+  while IFS=$'\t' read -r plus minus path; do
+    [[ $plus == "-" ]] && continue
+    # Renames render as "old => new"; charge the destination path.
+    [[ $path == *" => "* ]] && path=${path##* => }
+    budget_path_excluded "$path" && continue
+    added=$((added + plus))
+  done < <(cd "$root" && git diff --numstat "$base" -- "${filtered_pathspec[@]}" 2>/dev/null)
+  printf '%s' "$added"
 }
 
 build_prompt() {
@@ -613,6 +701,9 @@ load_reviewers() {
   fi
 
   if ((${#REVIEWERS[@]} == 0)); then
+    # Both default reviewers hunt what is MISSING, so every finding they raise argues for
+    # adding something. The skeptic supplies the only counter-pressure in the panel; without
+    # it the loop can only ratchet upward. Dropped by --no-skeptic for small bounded beads.
     REVIEWERS=(
       # NOTE: `codex review` rejects a custom [PROMPT] together with --base (they are mutually
       # exclusive), so the verify-before-asserting guard below cannot be injected into the default
@@ -622,6 +713,11 @@ load_reviewers() {
       'codex review --base "$BASE" -c '\''model="gpt-5.6-sol"'\'''
       'set -o pipefail; { git diff "$BASE" || printf "%s\\n" "rb-lite: could not compute a diff against $BASE (see the error above); the reviewer cannot see the change set"; } >"$RUN_DIR/reviewer-diff-round-$ROUND.patch" 2>&1; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. The complete diff is in $RUN_DIR/reviewer-diff-round-$ROUND.patch — read that file first, then read any source it touches to verify claims. If that file contains an rb-lite error instead of a diff, report exactly that as a P1 and do not claim the change is clean. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). Before asserting that the diff violates or overstates an invariant, or any claim about behavior in code the diff does not show, VERIFY it by reading that code and cite file:line; do not infer a cross-file property from the diff alone, and if you cannot verify such a claim mark it a QUESTION not a finding. If there are no actionable findings, output exactly: No findings. Do not modify any files." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit,Bash" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'\'''
     )
+    if [[ ${NO_SKEPTIC:-0} != 1 ]]; then
+      REVIEWERS+=(
+        'set -o pipefail; { git diff "$BASE" || printf "%s\\n" "rb-lite: could not compute a diff against $BASE (see the error above); the reviewer cannot see the change set"; } >"$RUN_DIR/skeptic-diff-round-$ROUND.patch" 2>&1; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE for OVER-SPECIFICATION, not for defects. The complete diff is in $RUN_DIR/skeptic-diff-round-$ROUND.patch — read that file first, then read any source it touches. If that file contains an rb-lite error instead of a diff, report exactly that as a P1 and do not claim the change is clean. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/. Flag any mechanism, handling, config, abstraction, or defensive check that is NOT required for correctness, security, or data safety and could be cut, simplified, or deferred. For each, state what it is, what already covers the case, and your recommendation. Judge against the change'\''s stated goal: a guard against a caller the threat model does not include is over-specification even when the guard is correct. Tag each finding on its own line with one of P2: CUT, P2: SIMPLIFY, or P2: DEFER. Do not report missing behavior, bugs, or style — other reviewers own those. If the change is already minimal for its goal, output exactly: No findings. Do not modify any files." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep" --disallowedTools "Edit,Write,NotebookEdit,Bash,WebSearch,WebFetch" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "skeptic reviewer returned is_error") else (.result // empty) end else empty end'\'''
+      )
+    fi
   fi
 }
 
@@ -788,6 +884,11 @@ run_command() {
   local implement_cmd_set=0
   local implementer_set=0
   local root round round_before round_after noop_round_streak
+  local max_production_lines=${RB_LITE_MAX_PRODUCTION_LINES:-}
+  local budget_excludes_set=0
+  local unchallenged_streak=0
+  local unchallenged_warned=0
+  local production_lines=0
   local implementer_preset_count=0
   local -a implementer_presets=()
   local -a review_paths=()
@@ -856,6 +957,24 @@ run_command() {
         min_findings_severity=$2
         shift 2
         ;;
+      --max-production-lines)
+        (($# >= 2)) || die "--max-production-lines requires a value"
+        max_production_lines=$2
+        shift 2
+        ;;
+      --budget-exclude)
+        (($# >= 2)) || die "--budget-exclude requires a value"
+        if ((budget_excludes_set == 0)); then
+          BUDGET_EXCLUDES=()
+          budget_excludes_set=1
+        fi
+        BUDGET_EXCLUDES+=("$2")
+        shift 2
+        ;;
+      --no-skeptic)
+        NO_SKEPTIC=1
+        shift
+        ;;
       --run-dir)
         (($# >= 2)) || die "--run-dir requires a value"
         requested_run_dir=$2
@@ -879,6 +998,8 @@ run_command() {
 
   is_positive_int "$max_rounds" || die "--max-rounds must be a positive integer"
   is_positive_int "$max_noop_rounds" || die "--max-noop-rounds must be a positive integer"
+  [[ -z $max_production_lines ]] || is_positive_int "$max_production_lines" \
+    || die "--max-production-lines must be a positive integer"
   is_positive_int "$max_iters" || die "--max-iters must be a positive integer"
   [[ -z $implement_timeout ]] || is_positive_int "$implement_timeout" \
     || die "--implement-timeout must be a positive integer number of seconds"
@@ -915,6 +1036,7 @@ run_command() {
   SUMMARY_MAX_ROUNDS=$max_rounds
   SUMMARY_MAX_ITERS=$max_iters
   SUMMARY_MAX_NOOP_ROUNDS=$max_noop_rounds
+  SUMMARY_MAX_PRODUCTION_LINES=$max_production_lines
   SUMMARY_MIN_FINDINGS_SEVERITY=$min_findings_severity
   SUMMARY_IMPLEMENT_TIMEOUT_SECS=$implement_timeout
   SUMMARY_REVIEWER_TIMEOUT_SECS=$reviewer_timeout
@@ -958,6 +1080,9 @@ run_command() {
   log_msg "run directory: $RUN_DIR"
   log_msg "base: $base"
   log_msg "max rounds: $max_rounds; max no-op rounds: $max_noop_rounds; max implementer iterations: $max_iters"
+  if [[ -n $max_production_lines ]]; then
+    log_msg "production line budget: $max_production_lines (excluding: ${BUDGET_EXCLUDES[*]})"
+  fi
   [[ -z $implement_timeout ]] || log_msg "implementer iteration timeout: ${implement_timeout}s"
   [[ -z $reviewer_timeout ]] || log_msg "reviewer timeout: ${reviewer_timeout}s"
 
@@ -985,6 +1110,43 @@ run_command() {
     fi
     SUMMARY_NOOP_ROUNDS_STREAK=$noop_round_streak
 
+    count_dispositions "$round"
+    log_msg "round $round dispositions: $ROUND_ACCEPTED accepted, $ROUND_DECLINED declined, $ROUND_DEFERRED deferred"
+    SUMMARY_ACCEPTED_TOTAL=$((SUMMARY_ACCEPTED_TOTAL + ROUND_ACCEPTED))
+    SUMMARY_DECLINED_TOTAL=$((SUMMARY_DECLINED_TOTAL + ROUND_DECLINED))
+    SUMMARY_DEFERRED_TOTAL=$((SUMMARY_DEFERRED_TOTAL + ROUND_DEFERRED))
+    SUMMARY_REJECTIONS_BY_ROUND+=("$((ROUND_DECLINED + ROUND_DEFERRED))")
+    # Only rounds that actually received findings can decline one, so round 1 (which runs
+    # with no review input) never counts toward the streak.
+    if ((${#review_paths[@]} > 0)); then
+      if ((ROUND_DECLINED + ROUND_DEFERRED == 0)); then
+        ((unchallenged_streak += 1))
+      else
+        unchallenged_streak=0
+      fi
+    fi
+
+    if [[ -n $max_production_lines ]]; then
+      production_lines=$(count_production_lines "$root" "$base")
+      SUMMARY_PRODUCTION_LINES=$production_lines
+      log_msg "round $round production lines added: $production_lines (budget $max_production_lines)"
+      if ((production_lines > max_production_lines)); then
+        SUMMARY_STATUS=budget_exceeded
+        log_msg "round $round exceeded the production budget; stopping"
+        printf 'rb-lite production budget exceeded: %s added lines against a budget of %s. Largest contributors:\n' \
+          "$production_lines" "$max_production_lines"
+        (cd "$root" && git diff --numstat "$base" -- "${filtered_pathspec[@]}" 2>/dev/null) \
+          | while IFS=$'\t' read -r plus _minus path; do
+              [[ $plus == "-" ]] && continue
+              [[ $path == *" => "* ]] && path=${path##* => }
+              budget_path_excluded "$path" && continue
+              printf '%s\t%s\n' "$plus" "$path"
+            done | sort -rn | head -n 5
+        printf 'A budget is a stop, not a retry target: re-shape the change or re-derive the baseline. Artifacts: %s\n' "$RUN_DIR"
+        exit "$EXIT_BUDGET"
+      fi
+    fi
+
     if ! run_review_panel "$root" "$round" "$base" "$reviewers_file" "$reviewer_timeout"; then
       die_with "$EXIT_REVIEW_PANEL" "review panel failed with exit $REVIEW_PANEL_FAILURE_EXIT; see $RUN_DIR"
     fi
@@ -1000,6 +1162,10 @@ run_command() {
           log_msg "round $round no-op implementer streak is $noop_round_streak (threshold $max_noop_rounds); consensus failure with reviewer findings"
           printf 'rb-lite consensus failure after %s no-op implementer round(s); reviewers still report findings but implementer is not changing state. Artifacts: %s\n' "$noop_round_streak" "$RUN_DIR"
           exit "$EXIT_CONSENSUS"
+        fi
+        if ((unchallenged_streak >= UNCHALLENGED_ROUNDS_WARN && unchallenged_warned == 0)); then
+          unchallenged_warned=1
+          log_msg "WARNING: $unchallenged_streak rounds with zero declined or deferred findings while reviewers keep reporting. The implementer may be accepting everything, which grows the change and the review surface together. Consider a skeptical pass, or check whether the task's budget and goal are still right."
         fi
         review_paths=("${REVIEW_FILES_PATHS[@]}")
         ((round++))
@@ -1057,10 +1223,21 @@ SUMMARY_MAX_NOOP_ROUNDS=2
 SUMMARY_MIN_FINDINGS_SEVERITY=P2
 SUMMARY_IMPLEMENT_TIMEOUT_SECS=14400
 SUMMARY_REVIEWER_TIMEOUT_SECS=1800
+SUMMARY_ACCEPTED_TOTAL=0
+SUMMARY_DECLINED_TOTAL=0
+SUMMARY_DEFERRED_TOTAL=0
+SUMMARY_PRODUCTION_LINES=0
+SUMMARY_MAX_PRODUCTION_LINES=
+NO_SKEPTIC=0
+ROUND_ACCEPTED=0
+ROUND_DECLINED=0
+ROUND_DEFERRED=0
 declare -a ACTIVE_CHILD_PIDS
 declare -a REVIEWERS
 declare -a REVIEWER_RCS
 declare -a REVIEW_FILES_PATHS
+declare -a SUMMARY_REJECTIONS_BY_ROUND=()
+declare -a BUDGET_EXCLUDES=("${DEFAULT_BUDGET_EXCLUDES[@]}")
 
 trap 'handle_signal HUP 1' HUP
 trap 'handle_signal INT 2' INT

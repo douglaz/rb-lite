@@ -101,7 +101,11 @@ write_fake_jq_result_extractor() {
   local repo=$1
   write_fake "$repo" jq '
 expected="if .type == \"result\" then if ((.is_error // false) or (((.subtype // \"\") | tostring) | test(\"error|fail\"))) then error(.result // \"claude reviewer returned is_error\") else (.result // empty) end else empty end"
-if [[ ${1:-} != -er || ${2:-} != "$expected" ]]; then
+# The skeptical reviewer runs the same filter but names itself in the error message, so
+# accept either. Anything else is still rejected: the point of pinning is that a reviewer
+# silently changing its extraction cannot pass as working.
+expected_skeptic=${expected/claude reviewer returned/skeptic reviewer returned}
+if [[ ${1:-} != -er ]] || { [[ ${2:-} != "$expected" ]] && [[ ${2:-} != "$expected_skeptic" ]]; }; then
   printf "unexpected jq args: %s\n" "$*" >&2
   exit 94
 fi
@@ -1494,8 +1498,17 @@ case "${1:-}" in
     ;;
 esac
 '
+  # Two default reviewers now shell out to claude concurrently, so the fake must not write
+  # one shared args file: whichever finished last would win and the assertions below would
+  # silently describe the wrong reviewer. Split by the skeptic's distinctive prompt.
   write_fake "$repo" claude '
 mkdir -p .rb-lite
+if printf "%s" "$*" | grep -q "OVER-SPECIFICATION"; then
+  printf "%s\n" "$*" >.rb-lite/claude-skeptic-args
+  printf "{\"type\":\"system\",\"subtype\":\"init\"}\n"
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"
+  exit 0
+fi
 printf "%s\n" "${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-}" >.rb-lite/claude-max-output-tokens
 printf "%s\n" "$*" >.rb-lite/claude-args
 printf "{\"type\":\"system\",\"subtype\":\"init\"}\n"
@@ -1515,8 +1528,20 @@ exit 97
 
   assert_file_contains "$run_dir/review-round-1-1.md" 'codex says clean'
   assert_file_contains "$run_dir/review-round-1-2.md" 'claude says clean from stream-json'
-  if [[ -e "$run_dir/review-round-1-3.md" ]]; then
-    fail "default panel must be two reviewers, found a third"
+  # The skeptic is the third default. Both other reviewers hunt what is missing, so without
+  # it every finding the panel can raise argues for adding something.
+  assert_file_contains "$run_dir/review-round-1-3.md" 'No findings.'
+  if [[ -e "$run_dir/review-round-1-4.md" ]]; then
+    fail "default panel must be three reviewers, found a fourth"
+  fi
+  if [[ ! -e "$repo/.rb-lite/claude-skeptic-args" ]]; then
+    fail "default panel did not run the skeptical reviewer"
+  fi
+  # The skeptic must be read-only and must not duplicate the defect reviewers' lens.
+  assert_file_contains "$repo/.rb-lite/claude-skeptic-args" 'CUT'
+  assert_file_contains "$repo/.rb-lite/claude-skeptic-args" '[-][-]disallowedTools'
+  if grep -qE 'allowedTools "[^"]*(Edit|Write|Bash)' "$repo/.rb-lite/claude-skeptic-args"; then
+    fail "skeptical reviewer must not be granted Edit/Write/Bash"
   fi
   if [[ -e "$repo/.rb-lite/npx-was-invoked" ]]; then
     fail "default panel invoked npx: $(cat "$repo/.rb-lite/npx-was-invoked")"
@@ -1595,7 +1620,9 @@ test_default_claude_reviewer_is_error_is_operational_failure() {
   assert_equals 11 "$status" "all-failed reviewer panel exit"
   assert_file_contains "$run_dir/review-round-1-2.md" 'Reviewer 2 \(exit 5'
   assert_file_contains "$run_dir/review-round-1-2.md" 'claude reviewer hit max turns'
-  assert_file_contains "$run_dir/log.txt" 'review panel failed: 0 of 2 reviewers succeeded'
+  # Three by default now: codex, the claude defect reviewer, and the skeptic. Both claude
+  # reviewers hit the same is_error fake, so the whole panel fails.
+  assert_file_contains "$run_dir/log.txt" 'review panel failed: 0 of 3 reviewers succeeded'
   assert_last_stdout_summary /tmp/rb-lite-test.out review_panel_failed 11
 }
 
@@ -2236,6 +2263,264 @@ printf "done\n"
   assert_file_contains "$repo/.rb-lite/impl-env" '^CLAUDE_CODE_SESSION_ID=keepme$' "RB_LITE_SCRUB_ENV= leaves the inherited env untouched"
 }
 
+assert_summary_field() {
+  local file=$1
+  local field=$2
+  local expected=$3
+  local last
+
+  [[ -f $file ]] || fail "missing file: $file"
+  last=$(tail -n 1 "$file")
+  printf '%s\n' "$last" | grep -Fq "\"$field\": $expected" \
+    || fail "summary field $field should be $expected: $last"
+}
+
+test_dispositions_are_counted_and_reported() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/dispositions"
+  # Every disposition form the prompt allows, plus decoys: a bare mention of the word in
+  # prose and a nested bullet. Only lines whose FIRST word is a disposition may count, or
+  # the totals silently inflate with every finding that discusses a rejection.
+  write_fake "$repo" fake-implementer '
+mkdir -p "$RUN_DIR"
+cat >"$RUN_DIR/challenges-round-$ROUND.md" <<"EOF"
+# Round decisions
+
+ACCEPTED reviewer asked for input validation on the id argument
+- DECLINED reviewer wants a retry loop; no data-loss case, only an inconvenience
+1. DEFERRED reviewer wants a second store backend; no consumer needs one yet
+**DECLINED** reviewer wants a lock; the caller already serializes at the boundary
+
+The reviewer DECLINED to justify finding 3, so we asked for evidence.
+EOF
+printf "work\n" >work.txt
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "count dispositions" --max-rounds 1 --max-iters 2 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains "$run_dir/log.txt" 'round 1 dispositions: 1 accepted, 2 declined, 1 deferred'
+  assert_summary_field /tmp/rb-lite-test.out findings_accepted 1
+  assert_summary_field /tmp/rb-lite-test.out findings_declined 2
+  assert_summary_field /tmp/rb-lite-test.out findings_deferred 1
+  assert_summary_field /tmp/rb-lite-test.out rejections_total 3
+  assert_summary_field /tmp/rb-lite-test.out rejections_by_round '[3]'
+}
+
+test_missing_challenges_file_counts_zero() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/no-challenges"
+  write_fake "$repo" fake-implementer 'printf "work\n" >work.txt'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "no challenges file" --max-rounds 1 --max-iters 2 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  # A round that received no findings has nothing to decide; that is not an error.
+  assert_file_contains "$run_dir/log.txt" 'round 1 dispositions: 0 accepted, 0 declined, 0 deferred'
+  assert_summary_field /tmp/rb-lite-test.out rejections_total 0
+}
+
+test_zero_rejections_warns_once_after_threshold() {
+  local repo run_dir status warn_count
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/unchallenged"
+  # Changes state every round so the no-op consensus stop cannot fire first, and never
+  # records a rejection: the implementer accepts everything the panel says.
+  write_fake "$repo" fake-implementer 'printf "round\n" >"round-$ROUND.txt"'
+  write_fake "$repo" fake-reviewer 'printf "P1 there is always one more edge case\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "unchallenged panel" --max-rounds 5 --max-iters 2 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out || status=$?
+
+  assert_equals 12 "$status" "unchallenged run still ends on max rounds"
+  warn_count=$(grep -c 'WARNING: 3 rounds with zero declined or deferred findings' "$run_dir/log.txt" || true)
+  assert_equals 1 "$warn_count" "zero-rejection warning fires exactly once"
+  # Round 1 runs with no review input, so it cannot decline anything and must not count.
+  assert_file_not_contains "$run_dir/log.txt" 'WARNING: 4 rounds with zero declined'
+}
+
+test_declining_a_finding_resets_the_warning_streak() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/challenged"
+  write_fake "$repo" fake-implementer '
+mkdir -p "$RUN_DIR"
+printf "round\n" >"round-$ROUND.txt"
+printf "DECLINED over-specification: nothing breaks without it\n" >"$RUN_DIR/challenges-round-$ROUND.md"
+'
+  write_fake "$repo" fake-reviewer 'printf "P1 there is always one more edge case\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "challenged panel" --max-rounds 5 --max-iters 2 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out || status=$?
+
+  assert_equals 12 "$status" "challenged run still ends on max rounds"
+  assert_file_not_contains "$run_dir/log.txt" 'WARNING: [0-9]* rounds with zero declined'
+}
+
+test_production_budget_stops_the_run() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/budget"
+  # Staged so it appears in `git diff --base`, which is what the reviewers see too.
+  write_fake "$repo" fake-implementer '
+if [[ ! -f big.txt ]]; then
+  for i in $(seq 1 500); do printf "line %s\n" "$i" >>big.txt; done
+  git add big.txt
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "over budget" --max-rounds 2 --max-iters 2 --base HEAD \
+    --max-production-lines 100 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  assert_equals 14 "$status" "production budget exit"
+  assert_last_stdout_summary /tmp/rb-lite-test.out budget_exceeded 14
+  assert_summary_field /tmp/rb-lite-test.out production_lines_added 500
+  assert_file_contains /tmp/rb-lite-test.out 'production budget exceeded: 500 added lines against a budget of 100'
+  # Naming the biggest contributor is the difference between a usable stop and a number.
+  assert_file_contains /tmp/rb-lite-test.out 'big\.txt'
+  assert_file_contains "$run_dir/log.txt" 'production line budget: 100'
+  # A budget must stop the run, not merely annotate it: the panel never ran.
+  if [[ -e "$run_dir/review-round-1-1.md" ]]; then
+    fail "budget stop must precede the review panel"
+  fi
+}
+
+test_production_budget_excludes_tests_by_default() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/budget-tests"
+  # A budget that counts tests is met by deleting coverage. 500 test lines plus 10
+  # production lines must pass a budget of 100.
+  write_fake "$repo" fake-implementer '
+if [[ ! -f tests/huge.test ]]; then
+  mkdir -p tests
+  for i in $(seq 1 500); do printf "assert %s\n" "$i" >>tests/huge.test; done
+  for i in $(seq 1 10); do printf "code %s\n" "$i" >>small.txt; done
+  git add tests/huge.test small.txt
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "test lines are free" --max-rounds 1 --max-iters 2 --base HEAD \
+    --max-production-lines 100 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out || status=$?
+
+  assert_equals 0 "$status" "test lines excluded from the budget"
+  assert_summary_field /tmp/rb-lite-test.out production_lines_added 10
+}
+
+test_budget_exclude_overrides_defaults() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/budget-override"
+  write_fake "$repo" fake-implementer '
+if [[ ! -f tests/huge.test ]]; then
+  mkdir -p tests
+  for i in $(seq 1 500); do printf "assert %s\n" "$i" >>tests/huge.test; done
+  git add tests/huge.test
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "explicit excludes replace defaults" --max-rounds 1 \
+    --max-iters 2 --base HEAD --max-production-lines 100 --budget-exclude 'vendor/*' \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  # The built-in test excludes are replaced, not merged, so the .test file now counts.
+  assert_equals 14 "$status" "overridden excludes drop the built-in test globs"
+  assert_summary_field /tmp/rb-lite-test.out production_lines_added 500
+}
+
+test_no_budget_flag_means_no_limit() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/no-budget"
+  write_fake "$repo" fake-implementer '
+if [[ ! -f big.txt ]]; then
+  for i in $(seq 1 500); do printf "line %s\n" "$i" >>big.txt; done
+  git add big.txt
+fi
+'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  status=0
+  run_rb_lite "$repo" run --task "no budget" --max-rounds 1 --max-iters 2 --base HEAD \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out || status=$?
+
+  assert_equals 0 "$status" "absent budget imposes no limit"
+  assert_file_not_contains "$run_dir/log.txt" 'production line budget'
+}
+
+test_invalid_production_budget_is_usage_error() {
+  local repo status
+  repo=$(new_repo)
+  status=0
+  run_rb_lite "$repo" run --task t --max-production-lines 0 \
+    --implement-cmd 'true' >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+  assert_equals 2 "$status" "zero production budget is a usage error"
+  assert_file_contains /tmp/rb-lite-test.err 'must be a positive integer'
+}
+
+test_no_skeptic_returns_the_two_reviewer_panel() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/no-skeptic"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "codex says clean\n"'
+  write_fake "$repo" claude '
+mkdir -p .rb-lite
+if printf "%s" "$*" | grep -q "OVER-SPECIFICATION"; then
+  printf "%s\n" "$*" >.rb-lite/skeptic-ran
+fi
+printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"claude says clean\"}\n"
+'
+
+  run_rb_lite "$repo" run --task "no skeptic" --max-rounds 1 --max-iters 1 --no-skeptic \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains "$run_dir/log.txt" 'review panel starting with 2 reviewer\(s\)'
+  if [[ -e "$repo/.rb-lite/skeptic-ran" ]]; then
+    fail "--no-skeptic must not run the skeptical reviewer"
+  fi
+}
+
+test_reviewers_file_panel_is_not_given_a_skeptic() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/custom-no-skeptic"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_reviewers "$repo" fake-reviewer
+
+  run_rb_lite "$repo" run --task "custom panel" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  # A caller-supplied panel is the caller's; injecting into it would silently change a
+  # configured review contract.
+  assert_file_contains "$run_dir/log.txt" 'review panel starting with 1 reviewer\(s\)'
+}
+
 mkdir -p "$TMP_ROOT"
 require_timeout_with_kill_after
 
@@ -2313,5 +2598,16 @@ test_failed_reviewer_path_omitted_from_review_files
 test_failed_reviewer_stdout_p_token_does_not_trigger_round
 test_failed_reviewer_stderr_p_token_does_not_trigger_round
 test_partial_reviewer_failure_does_not_abort
+test_dispositions_are_counted_and_reported
+test_missing_challenges_file_counts_zero
+test_zero_rejections_warns_once_after_threshold
+test_declining_a_finding_resets_the_warning_streak
+test_production_budget_stops_the_run
+test_production_budget_excludes_tests_by_default
+test_budget_exclude_overrides_defaults
+test_no_budget_flag_means_no_limit
+test_invalid_production_budget_is_usage_error
+test_no_skeptic_returns_the_two_reviewer_panel
+test_reviewers_file_panel_is_not_given_a_skeptic
 
 printf 'ok - smoke tests passed\n'
