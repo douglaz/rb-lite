@@ -2513,6 +2513,89 @@ printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result
   fi
 }
 
+test_skeptic_findings_alone_do_not_extend_the_run() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/skeptic-advisory"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "No findings.\n"'
+  # Only the skeptic reports, at the P2 its prompt hardcodes. At the default P2 floor this
+  # used to keep the loop running to max-rounds, so every run ended in an escalation.
+  write_fake "$repo" claude '
+if printf "%s" "$*" | grep -q "OVER-SPECIFICATION"; then
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"P2: CUT the retry wrapper\"}\n"
+else
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"
+fi
+'
+
+  run_rb_lite "$repo" run --task "advisory skeptic" --max-rounds 4 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+  local rc=$?
+
+  (( rc == 0 )) || fail "skeptic-only findings must still converge (exit $rc)"
+  assert_file_contains "$run_dir/log.txt" 'review panel clean'
+  # Converging must not mean discarding: the opinion is named, with its file.
+  assert_file_contains "$run_dir/log.txt" 'only the skeptical reviewer has findings'
+  assert_file_contains "$run_dir/log.txt" 'at the P2 floor'
+  assert_file_contains "$run_dir/log.txt" 'advisory and do not extend the run'
+  if grep -q 'round 2 implementer' "$run_dir/log.txt"; then
+    fail "skeptic-only findings must not start another round"
+  fi
+}
+
+test_skeptic_is_still_announced_at_a_raised_floor() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/skeptic-raised-floor"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "No findings.\n"'
+  write_fake "$repo" claude '
+if printf "%s" "$*" | grep -q "OVER-SPECIFICATION"; then
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"P2: CUT the retry wrapper\"}\n"
+else
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"
+fi
+'
+
+  run_rb_lite "$repo" run --task "raised floor skeptic" --max-rounds 1 --max-iters 1 \
+    --min-findings-severity P1 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out
+
+  # The skeptic is detected against a fixed P2 pattern, not through the floor. Routing it
+  # through the floor would hide it at P0/P1 and drop the advisory line exactly where a
+  # raised floor makes the opinion most likely to go unread.
+  assert_file_contains "$run_dir/log.txt" 'only the skeptical reviewer has findings'
+  assert_file_contains "$run_dir/log.txt" 'at the P1 floor'
+}
+
+test_defect_findings_still_extend_the_run_with_a_skeptic_present() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/skeptic-not-masking"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  # The defect reviewer reports; making the skeptic advisory must not swallow this.
+  write_fake "$repo" codex 'printf "P1: the parser drops the last row\n"'
+  write_fake "$repo" claude '
+if printf "%s" "$*" | grep -q "OVER-SPECIFICATION"; then
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"P2: CUT the retry wrapper\"}\n"
+else
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"
+fi
+'
+
+  run_rb_lite "$repo" run --task "real defect" --max-rounds 2 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out || true
+
+  assert_file_contains "$run_dir/log.txt" 'reported actionable findings'
+  if grep -q 'only the skeptical reviewer has findings' "$run_dir/log.txt"; then
+    fail "a real defect finding must not be reported as skeptic-only"
+  fi
+}
+
 test_reviewers_file_panel_is_not_given_a_skeptic() {
   local repo run_dir
   repo=$(new_repo)
@@ -2653,7 +2736,7 @@ test_supplied_panel_keeps_the_at_least_one_rule() {
   assert_equals 0 "$status" "a supplied panel is unaffected by the skeptic rule"
 }
 
-test_p1_floor_warns_that_it_silences_the_skeptic() {
+test_p1_floor_warns_that_it_silences_defect_p2s() {
   local repo run_dir status
   repo=$(new_repo)
   run_dir="$repo/.rb-lite/floor-skeptic"
@@ -2667,11 +2750,12 @@ test_p1_floor_warns_that_it_silences_the_skeptic() {
     --min-findings-severity P1 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
     >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
 
-  # The skeptic tags every finding P2, so a P1 floor filters it out entirely — and the
-  # skills advise raising the floor exactly when over-building starts. Silence there
-  # would remove the panel's only counter-pressure with no tell.
+  # A raised floor now silences only the defect reviewers' P2s; the skeptic is advisory
+  # at every floor. The warning must say that, so nobody raises the floor believing they
+  # are trading away counter-pressure they never had at P2 either.
   assert_equals 0 "$status" "a raised floor still runs"
-  assert_file_contains "$run_dir/log.txt" 'filters out the skeptical reviewer'
+  assert_file_contains "$run_dir/log.txt" 'ignores P2 findings from the defect reviewers'
+  assert_file_contains "$run_dir/log.txt" 'advisory at every floor'
 }
 
 test_default_floor_does_not_warn_about_the_skeptic() {
@@ -2887,13 +2971,16 @@ test_budget_exclude_overrides_defaults
 test_no_budget_flag_means_no_limit
 test_invalid_production_budget_is_usage_error
 test_no_skeptic_returns_the_two_reviewer_panel
+test_skeptic_findings_alone_do_not_extend_the_run
+test_skeptic_is_still_announced_at_a_raised_floor
+test_defect_findings_still_extend_the_run_with_a_skeptic_present
 test_reviewers_file_panel_is_not_given_a_skeptic
 test_budget_refuses_an_undiffable_base
 test_budget_charges_a_rename_to_its_destination_path
 test_skeptic_alone_is_not_a_reviewed_panel
 test_defect_reviewer_alone_still_clears_the_panel
 test_supplied_panel_keeps_the_at_least_one_rule
-test_p1_floor_warns_that_it_silences_the_skeptic
+test_p1_floor_warns_that_it_silences_defect_p2s
 test_default_floor_does_not_warn_about_the_skeptic
 test_budget_excludes_a_non_ascii_test_path
 test_undiffable_base_error_names_the_git_cause

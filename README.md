@@ -138,7 +138,7 @@ Common flags (full list: `rb-lite --help`):
 | `--max-rounds N` | 25 | Cap on implement→review cycles |
 | `--max-iters N` | 25 | Cap on implementer iterations within a round |
 | `--max-noop-rounds N` | 2 | Consecutive no-op implementer rounds before consensus-failure exit |
-| `--min-findings-severity LEVEL` | `P2` | Lowest severity that triggers another round (`P0`/`P1`/`P2`/`P3`) |
+| `--min-findings-severity LEVEL` | `P2` | Lowest **defect-reviewer** severity that triggers another round (`P0`/`P1`/`P2`/`P3`); the skeptic is advisory at every floor |
 | `--implement-timeout SECS` | 14400 | SIGTERM/SIGKILL each implementer iteration if it runs longer |
 | `--reviewer-timeout SECS` | 1800 | SIGTERM/SIGKILL each reviewer if it runs longer; empty disables |
 | `--implementer NAME[,NAME...]` | none | Select an implementer preset (`claude` or `codex`) or comma-separated preset cycle; required unless `--implement-cmd` or env equivalent is set |
@@ -192,6 +192,17 @@ The default panel is three reviewers: `codex review`, a `claude` reviewer huntin
 defects, and a `claude` skeptic hunting over-specification. The first two look for
 what is missing; the skeptic is the only one that can argue for removing something,
 which is what keeps a run from ratcheting. `--no-skeptic` drops it.
+
+The skeptic is **advisory**: its findings reach the implementer in every round the
+defect reviewers keep alive, and are always written to the run dir, but they never
+start a round of their own and never block a clean verdict. Its prompt tags every
+finding `P2` and the default floor is `P2`, so without this it could not let a run
+converge at all — across eight runs of one 2026-08 drive the panel went clean zero
+times and every run ended at max-rounds, escalating to a human. A reviewer whose job
+is to argue for less work must not be the reason more work happens. When it is the
+only reviewer with findings at the configured floor, the log says so and names its
+file. It is detected against a fixed `P2` pattern rather than through the floor, so
+raising the floor does not also hide the fact that it spoke.
 
 A `.rb-lite-reviewers` file replaces the panel wholesale — the skeptic is not
 injected into a panel you configured, so add your own if you want that
@@ -321,7 +332,8 @@ warning is a signal, not a stop — rb-lite keeps going.
 Counter-pressure on the *reviewer* side is on by default: the built-in panel
 includes a skeptical reviewer that hunts over-specification and tags findings
 `CUT` / `SIMPLIFY` / `DEFER`, so the panel is not composed solely of reviewers that
-push toward adding. Drop it with `--no-skeptic` for a small, already-bounded bead.
+push toward adding. It is advisory — it informs rounds that happen, and never causes
+one. Drop it with `--no-skeptic` for a small, already-bounded bead.
 A caller-supplied `.rb-lite-reviewers` panel is used exactly as written — the
 skeptic is never injected into it. See "Customizing the reviewer panel."
 
