@@ -5,7 +5,7 @@ PROGRAM=${0##*/}
 # Bumped deliberately, and reported by `--version` so a caller can require a floor.
 # A build without this command predates it; callers treat `unknown command: --version`
 # as "too old" rather than assuming a capability is present.
-RB_LITE_VERSION=0.3.0
+RB_LITE_VERSION=0.4.0
 readonly RB_LITE_VERSION
 TIMEOUT_KILL_AFTER=5s
 readonly TIMEOUT_KILL_AFTER
@@ -830,19 +830,35 @@ write_review_files() {
   done
 }
 
+# The skeptic is advisory and does not gate convergence. Its prompt hardcodes P2, and the
+# default floor is P2, so at defaults it could never let a run finish: across the eight runs
+# of the 2026-08-25..30 drive the panel went clean zero times, every run ended at max-rounds,
+# and every one of those escalated to a human. That is counter-pressure turned into a veto.
+# Its findings still reach the implementer in every round the defect reviewers keep alive,
+# and still land in the run dir; they just never start a round of their own. A reviewer that
+# argues for less work must not be the reason more work happens.
+SKEPTIC_ADVISORY_LOGGED=""
 review_has_findings() {
   local round=$1
   local count=$2
-  local idx stdout rc
+  local idx stdout rc skeptic_only=""
   for ((idx = 1; idx <= count; idx++)); do
     rc=${REVIEWER_RCS[$((idx - 1))]:-0}
     (( rc == 0 )) || continue
     stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
     [[ -f $stdout ]] || continue
-    if grep -Eq "$FINDINGS_SEVERITY_PATTERN" "$stdout"; then
-      return 0
+    grep -Eq "$FINDINGS_SEVERITY_PATTERN" "$stdout" || continue
+    if [[ -n ${SKEPTIC_REVIEWER_INDEX:-} ]] && (( idx == SKEPTIC_REVIEWER_INDEX )); then
+      skeptic_only=1
+      continue
     fi
+    return 0
   done
+  # Say so once per round rather than converging silently on an unread opinion.
+  if [[ -n $skeptic_only ]]; then
+    log_msg "round $round: only the skeptical reviewer has findings; they are advisory and do not extend the run (see $RUN_DIR/review-round-$round-${SKEPTIC_REVIEWER_INDEX}.md)"
+    SKEPTIC_ADVISORY_LOGGED=1
+  fi
   return 1
 }
 
@@ -1163,12 +1179,12 @@ run_command() {
   if [[ -n $max_production_lines ]]; then
     log_msg "production line budget: $max_production_lines (excluding: ${BUDGET_EXCLUDES[*]})"
   fi
-  # The skeptic tags every finding P2 by construction, so a P0/P1 floor filters it out
-  # entirely and the panel silently loses its only counter-pressure. Say so: raising the
-  # floor is advised precisely when over-building starts, which is when this matters most.
-  if [[ ${NO_SKEPTIC:-0} != 1 && ! -f $reviewers_file ]] \
-     && [[ $min_findings_severity == P0 || $min_findings_severity == P1 ]]; then
-    log_msg "WARNING: --min-findings-severity $min_findings_severity filters out the skeptical reviewer, which tags every finding P2. Its CUT/SIMPLIFY/DEFER findings cannot trigger a round or block a clean verdict at this floor, so the panel has no counter-pressure against over-building. Use P2 to keep it, or --no-skeptic to drop it deliberately."
+  # A raised floor silences the DEFECT reviewers' P2s, which is the whole of what it does
+  # now: the skeptic is advisory at every floor, so raising it no longer trades away the
+  # panel's counter-pressure. Naming that keeps the flag honest for anyone who reads the
+  # older advice to "use P2 to keep the skeptic".
+  if [[ $min_findings_severity == P0 || $min_findings_severity == P1 ]]; then
+    log_msg "WARNING: --min-findings-severity $min_findings_severity ignores P2 findings from the defect reviewers; they are still written to the run dir and still reach the implementer, but cannot trigger a round. The skeptical reviewer is advisory at every floor and is unaffected by this setting."
   fi
   [[ -z $implement_timeout ]] || log_msg "implementer iteration timeout: ${implement_timeout}s"
   [[ -z $reviewer_timeout ]] || log_msg "reviewer timeout: ${reviewer_timeout}s"
