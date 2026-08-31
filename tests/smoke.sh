@@ -132,6 +132,17 @@ write_reviewers() {
   local repo=$1
   shift
   printf '%s\n' "$@" >"$repo/.rb-lite-reviewers"
+  # A supplied gating panel no longer suppresses the skeptic -- that suppression WAS the
+  # ratchet trap. Without a stub here every custom-panel fixture would fall back to the
+  # built-in skeptic and shell out to the real `claude`, which hangs the suite on auth.
+  # Tests that are actually about skeptic behaviour write their own file.
+  [[ -f "$repo/.rb-lite-skeptics" ]] || write_skeptics "$repo" 'printf "No findings.\n"'
+}
+
+write_skeptics() {
+  local repo=$1
+  shift
+  printf '%s\n' "$@" >"$repo/.rb-lite-skeptics"
 }
 
 run_rb_lite() {
@@ -1801,7 +1812,7 @@ printf "%s\n" "$count" >"$count_file"
   assert_file_contains "$run_dir/review-round-1-1.md" 'stderr tail'
   assert_file_contains "$run_dir/review-round-1-1.md" 'boom'
   assert_file_contains "$run_dir/log.txt" 'reviewer 1 failed with exit 3'
-  assert_file_contains "$run_dir/log.txt" 'partial failures: 1 of 2 reviewers succeeded'
+  assert_file_contains "$run_dir/log.txt" 'partial failures: 2 of 3 reviewers succeeded'
 }
 
 test_implementer_retries_transient_api_error() {
@@ -2530,14 +2541,14 @@ else
 fi
 '
 
+  local rc=0
   run_rb_lite "$repo" run --task "advisory skeptic" --max-rounds 4 --max-iters 1 \
-    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
-  local rc=$?
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out || rc=$?
 
   (( rc == 0 )) || fail "skeptic-only findings must still converge (exit $rc)"
   assert_file_contains "$run_dir/log.txt" 'review panel clean'
   # Converging must not mean discarding: the opinion is named, with its file.
-  assert_file_contains "$run_dir/log.txt" 'the skeptical reviewer reported findings'
+  assert_file_contains "$run_dir/log.txt" 'a skeptical reviewer reported findings'
   assert_file_contains "$run_dir/log.txt" 'advisory and do not extend the run'
   assert_file_contains "$run_dir/log.txt" 'advisory and do not extend the run'
   if grep -q 'round 2 implementer' "$run_dir/log.txt"; then
@@ -2567,7 +2578,7 @@ fi
   # The skeptic is detected against a fixed P2 pattern, not through the floor. Routing it
   # through the floor would hide it at P0/P1 and drop the advisory line exactly where a
   # raised floor makes the opinion most likely to go unread.
-  assert_file_contains "$run_dir/log.txt" 'the skeptical reviewer reported findings'
+  assert_file_contains "$run_dir/log.txt" 'a skeptical reviewer reported findings'
 }
 
 test_skeptic_non_p2_findings_are_still_announced() {
@@ -2591,7 +2602,7 @@ fi
   run_rb_lite "$repo" run --task "skeptic p1" --max-rounds 1 --max-iters 1 \
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
 
-  assert_file_contains "$run_dir/log.txt" 'the skeptical reviewer reported findings'
+  assert_file_contains "$run_dir/log.txt" 'a skeptical reviewer reported findings'
   assert_file_contains "$run_dir/log.txt" 'review panel clean'
 }
 
@@ -2633,7 +2644,7 @@ test_raised_floor_warning_omits_the_skeptic_when_there_is_none() {
   # Reassuring the operator about a reviewer that is not in the panel is a false claim.
   assert_equals 0 "$status" "--no-skeptic with a raised floor still runs"
   assert_file_contains "$run_dir/log.txt" 'ignores P2 findings from the defect reviewers'
-  assert_file_not_contains "$run_dir/log.txt" 'built-in skeptical reviewer is matched off-floor'
+  assert_file_not_contains "$run_dir/log.txt" 'Skeptical reviewers are matched off-floor'
 }
 
 test_defect_findings_still_extend_the_run_with_a_skeptic_present() {
@@ -2656,25 +2667,84 @@ fi
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out || true
 
   assert_file_contains "$run_dir/log.txt" 'reported actionable findings'
-  if grep -q 'the skeptical reviewer reported findings' "$run_dir/log.txt"; then
+  if grep -q 'a skeptical reviewer reported findings' "$run_dir/log.txt"; then
     fail "a real defect finding must not be reported as skeptic-only"
   fi
 }
 
-test_reviewers_file_panel_is_not_given_a_skeptic() {
+test_supplied_panel_still_gets_counter_pressure() {
   local repo run_dir
   repo=$(new_repo)
-  run_dir="$repo/.rb-lite/custom-no-skeptic"
+  run_dir="$repo/.rb-lite/custom-keeps-skeptic"
   write_fake "$repo" fake-implementer 'printf "noop\n"'
   write_fake "$repo" fake-reviewer 'printf "No findings\n"'
-  write_reviewers "$repo" fake-reviewer
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" claude '
+mkdir -p .rb-lite
+printf "%s\n" "$*" >.rb-lite/skeptic-args
+printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"
+'
+  printf '%s\n' fake-reviewer >"$repo/.rb-lite-reviewers"   # reviewers file, NO skeptics file
 
+  local rc=0
   run_rb_lite "$repo" run --task "custom panel" --max-rounds 1 --max-iters 1 \
-    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out || rc=$?
+  assert_equals 0 "$rc" "a supplied panel with its skeptic converges"
 
-  # A caller-supplied panel is the caller's; injecting into it would silently change a
-  # configured review contract.
-  assert_file_contains "$run_dir/log.txt" 'review panel starting with 1 reviewer\(s\)'
+  # Supplying a gating panel used to delete the skeptic with it, which is what made
+  # overriding silently return the loop to add-only pressure -- and the documented
+  # workaround, carrying a skeptic into the reviewers file, made it gating instead.
+  # Skeptics are a separate axis now, so a supplied panel keeps its counter-pressure.
+  assert_file_contains "$run_dir/log.txt" 'review panel starting with 2 reviewer\(s\)'
+  assert_file_contains "$repo/.rb-lite/skeptic-args" 'OVER-SPECIFICATION'
+}
+
+test_supplied_skeptic_is_advisory() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/custom-skeptic-advisory"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_fake "$repo" my-skeptic 'printf "P2: CUT the retry wrapper\n"'
+  printf '%s\n' fake-reviewer >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" my-skeptic
+
+  local rc=0
+  run_rb_lite "$repo" run --task "custom skeptic" --max-rounds 4 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out || rc=$?
+
+  # The whole point of the second file: rb-lite cannot recognise a skeptic by looking at
+  # it, so declaring one is the only way its findings can be advisory. Before this, a
+  # carried-in skeptic gated rounds and drove clean runs to consensus_failure.
+  (( rc == 0 )) || fail "a declared skeptic must not gate the run (exit $rc)"
+  assert_file_contains "$run_dir/log.txt" 'review panel clean'
+  assert_file_contains "$run_dir/log.txt" 'skeptic findings are advisory'
+  if grep -q 'round 2 implementer' "$run_dir/log.txt"; then
+    fail "a declared skeptic must not start a round"
+  fi
+}
+
+test_skeptics_alone_are_not_a_reviewed_panel() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/skeptics-only"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" dead-reviewer 'printf "boom\n" >&2; exit 3'
+  write_fake "$repo" skeptic-a 'printf "No findings.\n"'
+  write_fake "$repo" skeptic-b 'printf "No findings.\n"'
+  printf '%s\n' dead-reviewer >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" skeptic-a skeptic-b
+
+  status=0
+  run_rb_lite "$repo" run --task "skeptics only" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out 2>&1 || status=$?
+
+  # Skeptics are forbidden from reporting defects, so a panel carried entirely by them has
+  # not reviewed the change. The old rule tested "exactly one succeeded and it was the
+  # skeptic", which passed as a reviewed panel exactly here -- two skeptics up, every
+  # gating reviewer dead -- and reported clean with nothing having looked for bugs.
+  assert_equals 11 "$status" "skeptics-only panel is a failed panel"
+  assert_file_contains "$run_dir/log.txt" 'only advisory .skeptical. reviewers succeeded'
 }
 
 test_budget_refuses_an_undiffable_base() {
@@ -2752,7 +2822,7 @@ printf "{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,\
   # The skeptic is forbidden from reporting defects, so its lone success means nothing
   # looked for bugs. Reporting `clean` here would be an unreviewed exit 0.
   assert_equals 11 "$status" "a skeptic-only success is a failed panel"
-  assert_file_contains "$run_dir/log.txt" 'only the skeptical reviewer succeeded'
+  assert_file_contains "$run_dir/log.txt" 'only advisory .skeptical. reviewers succeeded'
   assert_last_stdout_summary /tmp/rb-lite-test.out review_panel_failed 11
 }
 
@@ -2820,7 +2890,7 @@ test_p1_floor_warns_that_it_silences_defect_p2s() {
   # implementer will read them, since a finding that gates nothing ends the run.
   assert_equals 0 "$status" "a raised floor still runs"
   assert_file_contains "$run_dir/log.txt" 'ignores P2 findings from the defect reviewers'
-  assert_file_contains "$run_dir/log.txt" 'built-in skeptical reviewer is matched off-floor'
+  assert_file_contains "$run_dir/log.txt" 'Skeptical reviewers are matched off-floor'
 }
 
 test_default_floor_does_not_warn_about_the_skeptic() {
@@ -3046,7 +3116,9 @@ test_skeptic_non_p2_findings_are_still_announced
 test_p0_floor_names_every_severity_it_drops
 test_raised_floor_warning_omits_the_skeptic_when_there_is_none
 test_defect_findings_still_extend_the_run_with_a_skeptic_present
-test_reviewers_file_panel_is_not_given_a_skeptic
+test_supplied_panel_still_gets_counter_pressure
+test_supplied_skeptic_is_advisory
+test_skeptics_alone_are_not_a_reviewed_panel
 test_budget_refuses_an_undiffable_base
 test_budget_charges_a_rename_to_its_destination_path
 test_skeptic_alone_is_not_a_reviewed_panel

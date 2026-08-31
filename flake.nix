@@ -36,7 +36,7 @@
             # Keep in step with RB_LITE_VERSION in bin/rb-lite; a smoke test asserts they match,
             # because a derivation named 0.1.0 shipping a binary that reports 0.2.0 is worse
             # than either number being wrong.
-            version = "0.4.1";
+            version = "0.5.0";
             src = self;
 
             nativeBuildInputs = [ pkgs.makeWrapper ];

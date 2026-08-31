@@ -143,8 +143,9 @@ Common flags (full list: `rb-lite --help`):
 | `--reviewer-timeout SECS` | 1800 | SIGTERM/SIGKILL each reviewer if it runs longer; empty disables |
 | `--implementer NAME[,NAME...]` | none | Select an implementer preset (`claude` or `codex`) or comma-separated preset cycle; required unless `--implement-cmd` or env equivalent is set |
 | `--implement-cmd CMD` | none | Raw implementer subprocess escape hatch; takes precedence over presets |
-| `--reviewers-file PATH` | `.rb-lite-reviewers` | Custom reviewer panel (one shell command per line); replaces the built-in panel entirely, skeptic included |
-| `--no-skeptic` | off | Drop the skeptical reviewer from the built-in panel |
+| `--reviewers-file PATH` | `.rb-lite-reviewers` | Custom **gating** panel (one shell command per line); replaces the built-in defect reviewers. Skeptics are a separate axis and are not affected |
+| `--skeptics-file PATH` | `.rb-lite-skeptics` | Custom **advisory** panel; their findings inform rounds that happen but never start one. Falls back to the built-in skeptic |
+| `--no-skeptic` | off | Drop skeptics entirely, built-in or supplied |
 | `--max-production-lines N` | none | Exit `14` once added lines exceed N (test/fixture paths excluded) |
 | `--budget-exclude GLOB` | test/fixture globs | Path excluded from the budget count; first use replaces the built-in list |
 | `--branch NAME` | none | `git switch -c NAME` before starting |
@@ -193,7 +194,7 @@ defects, and a `claude` skeptic hunting over-specification. The first two look f
 what is missing; the skeptic is the only one that can argue for removing something,
 which is what keeps a run from ratcheting. `--no-skeptic` drops it.
 
-The skeptic is **advisory**: its findings reach the implementer in every round the
+Skeptics are **advisory**: their findings reach the implementer in every round the
 defect reviewers keep alive, and are always written to the run dir, but they never
 start a round of their own and never block a clean verdict. Its prompt tags every
 finding `P2` and the default floor is `P2`, so without this it could not let a run
@@ -204,10 +205,23 @@ only reviewer with findings at the configured floor, the log says so and names i
 file. It is detected against a fixed `P2` pattern rather than through the floor, so
 raising the floor does not also hide the fact that it spoke.
 
-A `.rb-lite-reviewers` file replaces the panel wholesale — the skeptic is not
-injected into a panel you configured, so add your own if you want that
-counter-pressure. To override, drop the file in your repo root with one shell
-command per line (blank lines and `#` comments ignored):
+The panel has **two axes, in two files**, because rb-lite cannot tell a skeptic from a
+defect reviewer by looking at it — both are opaque shell commands emitting
+severity-tagged lines, so identity has to be declared rather than inferred.
+
+| file | role | findings |
+| --- | --- | --- |
+| `.rb-lite-reviewers` | gating | start rounds |
+| `.rb-lite-skeptics` | advisory | inform rounds that happen; never start one |
+
+Either file falls back to its built-in default when absent, empty, or comments-only. So
+supplying a gating panel **keeps** your counter-pressure, and a skeptic you declare is
+advisory the same way the built-in one is. Before the split, `--reviewers-file` replaced
+both: overriding silently deleted the skeptic, and the documented workaround — carrying a
+skeptic into the reviewers file — made it gating again and drove clean runs to
+`consensus_failure`.
+
+One shell command per line (blank lines and `#` comments ignored):
 
 > **Upgrading from a version with the Gemini reviewer:** `$RUN_DIR/gemini-policy.toml`
 > is no longer generated, because it existed only for the default Gemini reviewer that
@@ -247,11 +261,10 @@ as at least one **defect** reviewer succeeds.
   entirely. A linter that exits non-zero on findings must be wrapped:
   `mylinter || true`.
 - Panel succeeds with **at least one exit-0 defect reviewer**; failed reviewers
-  don't abort the run. In the built-in panel the skeptic succeeding *alone* is a
-  failed panel (exit `11`) — it is forbidden from reporting defects, so a clean
-  verdict carrying only its vote would mean nothing looked for bugs. Members of a
-  supplied `.rb-lite-reviewers` are opaque to rb-lite, so the plain at-least-one
-  rule still applies there.
+  don't abort the run. Skeptics succeeding *alone* is a failed panel (exit `11`) — they
+  are forbidden from reporting defects, so a verdict carrying only their votes would
+  mean nothing looked for bugs. This is counted, not position-matched, so it holds for
+  any number of skeptics.
 
 ## Customizing the implementer
 
@@ -334,8 +347,8 @@ includes a skeptical reviewer that hunts over-specification and tags findings
 `CUT` / `SIMPLIFY` / `DEFER`, so the panel is not composed solely of reviewers that
 push toward adding. It is advisory — it informs rounds that happen, and never causes
 one. Drop it with `--no-skeptic` for a small, already-bounded bead.
-A caller-supplied `.rb-lite-reviewers` panel is used exactly as written — the
-skeptic is never injected into it. See "Customizing the reviewer panel."
+A caller-supplied `.rb-lite-reviewers` replaces only the gating reviewers; declare
+advisory ones in `.rb-lite-skeptics`. See "Customizing the reviewer panel."
 
 ### Budgets stop the run
 
