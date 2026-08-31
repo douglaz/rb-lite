@@ -2537,8 +2537,8 @@ fi
   (( rc == 0 )) || fail "skeptic-only findings must still converge (exit $rc)"
   assert_file_contains "$run_dir/log.txt" 'review panel clean'
   # Converging must not mean discarding: the opinion is named, with its file.
-  assert_file_contains "$run_dir/log.txt" 'only the skeptical reviewer has findings'
-  assert_file_contains "$run_dir/log.txt" 'at the P2 floor'
+  assert_file_contains "$run_dir/log.txt" 'the skeptical reviewer reported findings'
+  assert_file_contains "$run_dir/log.txt" 'advisory and do not extend the run'
   assert_file_contains "$run_dir/log.txt" 'advisory and do not extend the run'
   if grep -q 'round 2 implementer' "$run_dir/log.txt"; then
     fail "skeptic-only findings must not start another round"
@@ -2567,8 +2567,73 @@ fi
   # The skeptic is detected against a fixed P2 pattern, not through the floor. Routing it
   # through the floor would hide it at P0/P1 and drop the advisory line exactly where a
   # raised floor makes the opinion most likely to go unread.
-  assert_file_contains "$run_dir/log.txt" 'only the skeptical reviewer has findings'
-  assert_file_contains "$run_dir/log.txt" 'at the P1 floor'
+  assert_file_contains "$run_dir/log.txt" 'the skeptical reviewer reported findings'
+}
+
+test_skeptic_non_p2_findings_are_still_announced() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/skeptic-p1"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "No findings.\n"'
+  # The skeptic's own prompt tells it to emit a P1 when handed an rb-lite error instead of a
+  # diff. Matching it on P2 alone swallowed exactly that case: the run went clean with no
+  # advisory line, and the only other signal was the defect reviewer failing the same way.
+  write_fake "$repo" claude '
+if printf "%s" "$*" | grep -q "OVER-SPECIFICATION"; then
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"P1: rb-lite could not compute a diff\"}\n"
+else
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"
+fi
+'
+
+  run_rb_lite "$repo" run --task "skeptic p1" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains "$run_dir/log.txt" 'the skeptical reviewer reported findings'
+  assert_file_contains "$run_dir/log.txt" 'review panel clean'
+}
+
+test_p0_floor_names_every_severity_it_drops() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/floor-p0"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "No findings.\n"'
+  write_fake "$repo" claude 'printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"'
+
+  status=0
+  run_rb_lite "$repo" run --task "p0 floor" --max-rounds 1 --max-iters 1 \
+    --min-findings-severity P0 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  # A P0 floor drops P1 as well as P2. A warning that names only P2 understates what the
+  # operator just turned off, which is the direction that gets a real should-fix ignored.
+  assert_equals 0 "$status" "a P0 floor still runs"
+  assert_file_contains "$run_dir/log.txt" 'ignores P1 and P2 findings from the defect reviewers'
+}
+
+test_raised_floor_warning_omits_the_skeptic_when_there_is_none() {
+  local repo run_dir status
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/floor-no-skeptic"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "No findings.\n"'
+  write_fake "$repo" claude 'printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"'
+
+  status=0
+  run_rb_lite "$repo" run --task "no skeptic floor" --max-rounds 1 --max-iters 1 \
+    --min-findings-severity P1 --no-skeptic --implement-cmd 'fake-implementer' \
+    --run-dir "$run_dir" >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
+
+  # With --no-skeptic there is no built-in skeptic for the setting to leave unaffected.
+  # Reassuring the operator about a reviewer that is not in the panel is a false claim.
+  assert_equals 0 "$status" "--no-skeptic with a raised floor still runs"
+  assert_file_contains "$run_dir/log.txt" 'ignores P2 findings from the defect reviewers'
+  assert_file_not_contains "$run_dir/log.txt" 'built-in skeptical reviewer is matched off-floor'
 }
 
 test_defect_findings_still_extend_the_run_with_a_skeptic_present() {
@@ -2591,7 +2656,7 @@ fi
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out || true
 
   assert_file_contains "$run_dir/log.txt" 'reported actionable findings'
-  if grep -q 'only the skeptical reviewer has findings' "$run_dir/log.txt"; then
+  if grep -q 'the skeptical reviewer reported findings' "$run_dir/log.txt"; then
     fail "a real defect finding must not be reported as skeptic-only"
   fi
 }
@@ -2750,12 +2815,12 @@ test_p1_floor_warns_that_it_silences_defect_p2s() {
     --min-findings-severity P1 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
     >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
 
-  # A raised floor now silences only the defect reviewers' P2s; the skeptic is advisory
-  # at every floor. The warning must say that, so nobody raises the floor believing they
-  # are trading away counter-pressure they never had at P2 either.
+  # A raised floor silences the defect reviewers' lower severities and nothing else. The
+  # warning must name which ones -- a P0 floor drops P1 as well -- and must not promise the
+  # implementer will read them, since a finding that gates nothing ends the run.
   assert_equals 0 "$status" "a raised floor still runs"
   assert_file_contains "$run_dir/log.txt" 'ignores P2 findings from the defect reviewers'
-  assert_file_contains "$run_dir/log.txt" 'advisory at every floor'
+  assert_file_contains "$run_dir/log.txt" 'built-in skeptical reviewer is matched off-floor'
 }
 
 test_default_floor_does_not_warn_about_the_skeptic() {
@@ -2770,7 +2835,11 @@ test_default_floor_does_not_warn_about_the_skeptic() {
   run_rb_lite "$repo" run --task "default floor" --max-rounds 1 --max-iters 1 \
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
 
-  assert_file_not_contains "$run_dir/log.txt" 'filters out the skeptical reviewer'
+  # Assert against the string the code can actually emit. The previous assertion named a
+  # warning this change had already deleted, so no code path could produce it and the test
+  # passed no matter what the default floor logged.
+  assert_file_not_contains "$run_dir/log.txt" 'ignores'
+  assert_file_not_contains "$run_dir/log.txt" 'WARNING: --min-findings-severity'
 }
 
 test_budget_excludes_a_non_ascii_test_path() {
@@ -2973,6 +3042,9 @@ test_invalid_production_budget_is_usage_error
 test_no_skeptic_returns_the_two_reviewer_panel
 test_skeptic_findings_alone_do_not_extend_the_run
 test_skeptic_is_still_announced_at_a_raised_floor
+test_skeptic_non_p2_findings_are_still_announced
+test_p0_floor_names_every_severity_it_drops
+test_raised_floor_warning_omits_the_skeptic_when_there_is_none
 test_defect_findings_still_extend_the_run_with_a_skeptic_present
 test_reviewers_file_panel_is_not_given_a_skeptic
 test_budget_refuses_an_undiffable_base

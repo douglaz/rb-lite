@@ -8,7 +8,7 @@ uses codex and [`claude`](https://docs.anthropic.com/claude/docs/claude-code) as
 the default reviewer panel — two defect reviewers plus a skeptic that hunts
 over-specification — with all models pinned. Repeatedly invokes the
 implementer until the git diff stabilizes, runs the reviewer panel in parallel, feeds
-P0/P1/P2 findings back into the implementer, and stops when the panel is clean,
+gating findings back into the implementer, and stops when no defect reviewer gates a round,
 the implementer refuses to act on remaining findings, or a budget cap is hit.
 
 Entirely in shell, no daemons, no state DB, runs in any git repo.
@@ -110,7 +110,7 @@ You can override or replace either side — see "Configuration" below.
                  └───────────────────────────┬───────────────────────┘
                                              │
                                              ▼
-        clean (no P0/P1/P2)?  ──────► EXIT 0
+  clean (no gating finding)?  ──────► EXIT 0
         no defect reviewer survived? ► EXIT 11
         max rounds hit?  ───────────► EXIT 12
         2 no-op rounds + findings? ─► EXIT 13 (consensus failure)
@@ -357,7 +357,7 @@ or re-derive the baseline, not to raise `N`.
 
 | Code | Status | Meaning |
 |---|---|---|
-| `0`  | `clean` | Review panel reported no findings at or above severity floor |
+| `0`  | `clean` | No **defect** reviewer reported a finding at or above the severity floor. The built-in skeptic is advisory, so a clean run may still carry its findings — `clean` means nothing gated the round, not finding-free |
 | `2`  | `usage_error` | CLI parsing failure, invalid value, conflicting flags |
 | `3`  | `env_error` | Not in git repo, missing tool, run-dir setup failure |
 | `10` | `implementer_failed` | Implementer subprocess non-zero (incl. timeout 124/137) or max-iters without stabilizing. Transient provider errors (rate limit / overloaded / 5xx / network) are retried with backoff first — see `RB_LITE_API_RETRY_DELAYS` / `RB_LITE_API_MAX_RETRIES` |

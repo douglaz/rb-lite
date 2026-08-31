@@ -5,7 +5,7 @@ PROGRAM=${0##*/}
 # Bumped deliberately, and reported by `--version` so a caller can require a floor.
 # A build without this command predates it; callers treat `unknown command: --version`
 # as "too old" rather than assuming a capability is present.
-RB_LITE_VERSION=0.4.0
+RB_LITE_VERSION=0.4.1
 readonly RB_LITE_VERSION
 TIMEOUT_KILL_AFTER=5s
 readonly TIMEOUT_KILL_AFTER
@@ -107,7 +107,8 @@ Options:
                           RB_LITE_IMPLEMENT_CMD.
   --reviewers-file PATH   Reviewer command file. Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
   --min-findings-severity LEVEL
-                          Minimum reviewer finding severity that triggers another round.
+                          Minimum DEFECT-reviewer finding severity that triggers another
+                          round. The built-in skeptic is advisory and matched off-floor.
                           One of P0, P1, P2, P3. Default:
                           RB_LITE_MIN_FINDINGS_SEVERITY or P2.
   --max-production-lines N
@@ -837,7 +838,6 @@ write_review_files() {
 # Its findings still reach the implementer in every round the defect reviewers keep alive,
 # and still land in the run dir; they just never start a round of their own. A reviewer that
 # argues for less work must not be the reason more work happens.
-SKEPTIC_ADVISORY_LOGGED=""
 review_has_findings() {
   local round=$1
   local count=$2
@@ -855,13 +855,14 @@ review_has_findings() {
     grep -Eq "$FINDINGS_SEVERITY_PATTERN" "$stdout" || continue
     return 0
   done
-  # Say so once per round rather than converging silently on an unread opinion. Scoped to
-  # the floor on purpose: a defect reviewer's sub-floor finding is also present but was
-  # deliberately not counted, so claiming the skeptic is the only one with anything to say
-  # would be false.
+  # Say so rather than converging silently on an unread opinion. The message claims only
+  # what this function knows: the skeptic reported something and nothing gated the round.
+  # It deliberately does NOT say the skeptic is the only reviewer with anything to say —
+  # the skeptic is matched off-floor, so at a raised floor a defect reviewer's finding of
+  # the very same severity is excluded here, and a reviewer that exited non-zero was
+  # skipped before its output was read. Either would make an "only" claim false.
   if [[ -n $skeptic_only ]]; then
-    log_msg "round $round: at the $MIN_FINDINGS_SEVERITY floor only the skeptical reviewer has findings; they are advisory and do not extend the run (see $RUN_DIR/review-round-$round-${SKEPTIC_REVIEWER_INDEX}.md)"
-    SKEPTIC_ADVISORY_LOGGED=1
+    log_msg "round $round: the skeptical reviewer reported findings and no reviewer gated the round; its findings are advisory and do not extend the run (see $RUN_DIR/review-round-$round-${SKEPTIC_REVIEWER_INDEX}.md)"
   fi
   return 1
 }
@@ -1151,12 +1152,13 @@ run_command() {
   findings_severity_pattern=$(build_findings_pattern "$findings_severity_digits")
   MIN_FINDINGS_SEVERITY=$min_findings_severity
   FINDINGS_SEVERITY_PATTERN=$findings_severity_pattern
-  # The skeptic's prompt mandates P2, so it is detected against a fixed P2 pattern rather
-  # than through the floor. At a P0/P1 floor the floor pattern hides it, and the advisory
-  # log line — the one thing standing between its opinion and a silent clean verdict —
-  # would never print, exactly where a raised floor makes it most likely to be missed.
-  # Built by the same function so the two patterns cannot drift apart.
-  SKEPTIC_FINDINGS_PATTERN=$(build_findings_pattern 2)
+  # The skeptic is detected across every severity rather than through the floor. At a P0/P1
+  # floor the floor pattern hides its mandated P2, and the advisory log line — the one thing
+  # standing between its opinion and a silent clean verdict — would never print, exactly
+  # where a raised floor makes it most likely to be missed. P0-P3 rather than P2 alone
+  # because its prompt also emits a P1 when handed an rb-lite error instead of a diff, and a
+  # P2-only match swallowed that too. Built by the same function so the two cannot drift.
+  SKEPTIC_FINDINGS_PATTERN=$(build_findings_pattern 0-3)
   ACTIONABLE_FINDINGS_SEVERITIES=$actionable_findings_severities
   if [[ -n $implement_timeout || -n $reviewer_timeout ]]; then
     local timeout_message
@@ -1193,12 +1195,19 @@ run_command() {
   if [[ -n $max_production_lines ]]; then
     log_msg "production line budget: $max_production_lines (excluding: ${BUDGET_EXCLUDES[*]})"
   fi
-  # A raised floor silences the DEFECT reviewers' P2s, which is the whole of what it does
-  # now: the skeptic is advisory at every floor, so raising it no longer trades away the
-  # panel's counter-pressure. Naming that keeps the flag honest for anyone who reads the
-  # older advice to "use P2 to keep the skeptic".
+  # A raised floor silences the DEFECT reviewers' lower severities, which is the whole of
+  # what it does now that the built-in skeptic is matched off-floor. Named exactly: a P0
+  # floor drops P1 as well as P2, and an ignored finding reaches the implementer only if
+  # some OTHER finding keeps that round alive — if it is the only one, the run exits clean
+  # and nobody ever reads it. The skeptic clause is conditional because with --no-skeptic
+  # or a supplied panel there is no built-in skeptic to be unaffected.
   if [[ $min_findings_severity == P0 || $min_findings_severity == P1 ]]; then
-    log_msg "WARNING: --min-findings-severity $min_findings_severity ignores P2 findings from the defect reviewers; they are still written to the run dir and still reach the implementer, but cannot trigger a round. The skeptical reviewer is advisory at every floor and is unaffected by this setting."
+    local ignored_severities=P2 skeptic_note=""
+    [[ $min_findings_severity == P0 ]] && ignored_severities="P1 and P2"
+    if [[ ${NO_SKEPTIC:-0} != 1 && ! -f $reviewers_file ]]; then
+      skeptic_note=" The built-in skeptical reviewer is matched off-floor and is unaffected by this setting."
+    fi
+    log_msg "WARNING: --min-findings-severity $min_findings_severity ignores $ignored_severities findings from the defect reviewers. They are still written to the run dir, but cannot trigger a round, and reach the implementer only in a round some other finding keeps alive.$skeptic_note"
   fi
   [[ -z $implement_timeout ]] || log_msg "implementer iteration timeout: ${implement_timeout}s"
   [[ -z $reviewer_timeout ]] || log_msg "reviewer timeout: ${reviewer_timeout}s"
