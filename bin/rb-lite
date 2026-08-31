@@ -847,16 +847,20 @@ review_has_findings() {
     (( rc == 0 )) || continue
     stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
     [[ -f $stdout ]] || continue
-    grep -Eq "$FINDINGS_SEVERITY_PATTERN" "$stdout" || continue
     if [[ -n ${SKEPTIC_REVIEWER_INDEX:-} ]] && (( idx == SKEPTIC_REVIEWER_INDEX )); then
-      skeptic_only=1
+      grep -Eq "${SKEPTIC_FINDINGS_PATTERN:-$FINDINGS_SEVERITY_PATTERN}" "$stdout" \
+        && skeptic_only=1
       continue
     fi
+    grep -Eq "$FINDINGS_SEVERITY_PATTERN" "$stdout" || continue
     return 0
   done
-  # Say so once per round rather than converging silently on an unread opinion.
+  # Say so once per round rather than converging silently on an unread opinion. Scoped to
+  # the floor on purpose: a defect reviewer's sub-floor finding is also present but was
+  # deliberately not counted, so claiming the skeptic is the only one with anything to say
+  # would be false.
   if [[ -n $skeptic_only ]]; then
-    log_msg "round $round: only the skeptical reviewer has findings; they are advisory and do not extend the run (see $RUN_DIR/review-round-$round-${SKEPTIC_REVIEWER_INDEX}.md)"
+    log_msg "round $round: at the $MIN_FINDINGS_SEVERITY floor only the skeptical reviewer has findings; they are advisory and do not extend the run (see $RUN_DIR/review-round-$round-${SKEPTIC_REVIEWER_INDEX}.md)"
     SKEPTIC_ADVISORY_LOGGED=1
   fi
   return 1
@@ -1138,11 +1142,21 @@ run_command() {
   SUMMARY_REVIEWER_TIMEOUT_SECS=$reviewer_timeout
   # Line tags cover the canonical reviewer examples in tests; the fallback
   # handles common "Issue 1 (P2): ..." style parenthesized severities.
-  findings_line_tag="${findings_tag_prefix}(${findings_tag_marker}\\[P[${findings_severity_digits}]\\]${findings_tag_marker}${findings_tag_boundary}?|${findings_tag_marker}P[${findings_severity_digits}]${findings_tag_sep}${findings_tag_marker}${findings_tag_boundary}?|${findings_tag_marker}P[${findings_severity_digits}]${findings_tag_marker}${findings_tag_boundary})"
-  findings_paren_tag='^[[:space:]]*([-*+][[:space:]]*|[0-9]+[.)][[:space:]]*|#{1,6}[[:space:]]*)?([[:alpha:]]+[[:space:]]+[0-9]+[[:space:]]*)?[(]P['"${findings_severity_digits}"'][)]([[:space:]]+|[[:space:]]*[:,.)-]|$)'
-  findings_severity_pattern="${findings_line_tag}|${findings_paren_tag}"
+  build_findings_pattern() {  # $1 = severity digit class, e.g. 0-2 or 2
+    local d=$1 line_tag paren_tag
+    line_tag="${findings_tag_prefix}(${findings_tag_marker}\\[P[${d}]\\]${findings_tag_marker}${findings_tag_boundary}?|${findings_tag_marker}P[${d}]${findings_tag_sep}${findings_tag_marker}${findings_tag_boundary}?|${findings_tag_marker}P[${d}]${findings_tag_marker}${findings_tag_boundary})"
+    paren_tag='^[[:space:]]*([-*+][[:space:]]*|[0-9]+[.)][[:space:]]*|#{1,6}[[:space:]]*)?([[:alpha:]]+[[:space:]]+[0-9]+[[:space:]]*)?[(]P['"${d}"'][)]([[:space:]]+|[[:space:]]*[:,.)-]|$)'
+    printf '%s|%s' "$line_tag" "$paren_tag"
+  }
+  findings_severity_pattern=$(build_findings_pattern "$findings_severity_digits")
   MIN_FINDINGS_SEVERITY=$min_findings_severity
   FINDINGS_SEVERITY_PATTERN=$findings_severity_pattern
+  # The skeptic's prompt mandates P2, so it is detected against a fixed P2 pattern rather
+  # than through the floor. At a P0/P1 floor the floor pattern hides it, and the advisory
+  # log line — the one thing standing between its opinion and a silent clean verdict —
+  # would never print, exactly where a raised floor makes it most likely to be missed.
+  # Built by the same function so the two patterns cannot drift apart.
+  SKEPTIC_FINDINGS_PATTERN=$(build_findings_pattern 2)
   ACTIONABLE_FINDINGS_SEVERITIES=$actionable_findings_severities
   if [[ -n $implement_timeout || -n $reviewer_timeout ]]; then
     local timeout_message

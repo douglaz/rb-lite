@@ -200,7 +200,9 @@ finding `P2` and the default floor is `P2`, so without this it could not let a r
 converge at all — across eight runs of one 2026-08 drive the panel went clean zero
 times and every run ended at max-rounds, escalating to a human. A reviewer whose job
 is to argue for less work must not be the reason more work happens. When it is the
-only reviewer with findings, the log says so and names its file.
+only reviewer with findings at the configured floor, the log says so and names its
+file. It is detected against a fixed `P2` pattern rather than through the floor, so
+raising the floor does not also hide the fact that it spoke.
 
 A `.rb-lite-reviewers` file replaces the panel wholesale — the skeptic is not
 injected into a panel you configured, so add your own if you want that

@@ -2538,10 +2538,37 @@ fi
   assert_file_contains "$run_dir/log.txt" 'review panel clean'
   # Converging must not mean discarding: the opinion is named, with its file.
   assert_file_contains "$run_dir/log.txt" 'only the skeptical reviewer has findings'
+  assert_file_contains "$run_dir/log.txt" 'at the P2 floor'
   assert_file_contains "$run_dir/log.txt" 'advisory and do not extend the run'
   if grep -q 'round 2 implementer' "$run_dir/log.txt"; then
     fail "skeptic-only findings must not start another round"
   fi
+}
+
+test_skeptic_is_still_announced_at_a_raised_floor() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/skeptic-raised-floor"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake_jq_result_extractor "$repo"
+  write_fake "$repo" codex 'printf "No findings.\n"'
+  write_fake "$repo" claude '
+if printf "%s" "$*" | grep -q "OVER-SPECIFICATION"; then
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"P2: CUT the retry wrapper\"}\n"
+else
+  printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"No findings.\"}\n"
+fi
+'
+
+  run_rb_lite "$repo" run --task "raised floor skeptic" --max-rounds 1 --max-iters 1 \
+    --min-findings-severity P1 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
+    >/tmp/rb-lite-test.out
+
+  # The skeptic is detected against a fixed P2 pattern, not through the floor. Routing it
+  # through the floor would hide it at P0/P1 and drop the advisory line exactly where a
+  # raised floor makes the opinion most likely to go unread.
+  assert_file_contains "$run_dir/log.txt" 'only the skeptical reviewer has findings'
+  assert_file_contains "$run_dir/log.txt" 'at the P1 floor'
 }
 
 test_defect_findings_still_extend_the_run_with_a_skeptic_present() {
@@ -2945,6 +2972,7 @@ test_no_budget_flag_means_no_limit
 test_invalid_production_budget_is_usage_error
 test_no_skeptic_returns_the_two_reviewer_panel
 test_skeptic_findings_alone_do_not_extend_the_run
+test_skeptic_is_still_announced_at_a_raised_floor
 test_defect_findings_still_extend_the_run_with_a_skeptic_present
 test_reviewers_file_panel_is_not_given_a_skeptic
 test_budget_refuses_an_undiffable_base
