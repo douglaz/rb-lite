@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Cleared once, before any fixture runs, because many tests invoke rb-lite directly with
+# inline env rather than through run_rb_lite. An exported RB_LITE_SKEPTICS_FILE pointing at
+# a path that does not exist makes every fixture fall back to the BUILT-IN skeptic and shell
+# out to the real `claude` -- 95 real invocations before the first assertion failed. No
+# fixture ever wants an ambient panel file.
+unset RB_LITE_REVIEWERS_FILE RB_LITE_SKEPTICS_FILE
+
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TMP_ROOT=${TMPDIR:-/tmp}/rb-lite-tests.$$
 
@@ -150,6 +157,7 @@ run_rb_lite() {
   shift
   (
     cd "$repo"
+    unset RB_LITE_REVIEWERS_FILE RB_LITE_SKEPTICS_FILE RB_LITE_IMPLEMENT_CMD RB_LITE_IMPLEMENTER
     PATH="$repo/fakes:$PATH" "$repo/bin/rb-lite" "$@"
   )
 }
@@ -806,7 +814,7 @@ test_missing_implementer_is_usage_error_with_summary() {
   status=0
   (
     cd "$repo"
-    unset RB_LITE_IMPLEMENT_CMD RB_LITE_IMPLEMENTER
+    unset RB_LITE_IMPLEMENT_CMD RB_LITE_IMPLEMENTER RB_LITE_REVIEWERS_FILE RB_LITE_SKEPTICS_FILE
     PATH="$repo/fakes:$PATH" "$repo/bin/rb-lite" run --task "missing implementer" \
       --max-rounds 1 --max-iters 1
   ) >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
@@ -2555,7 +2563,6 @@ fi
   # Converging must not mean discarding: the opinion is named, with its file.
   assert_file_contains "$run_dir/log.txt" 'a skeptical reviewer reported findings'
   assert_file_contains "$run_dir/log.txt" 'advisory and do not extend the run'
-  assert_file_contains "$run_dir/log.txt" 'advisory and do not extend the run'
   if grep -q 'round 2 implementer' "$run_dir/log.txt"; then
     fail "skeptic-only findings must not start another round"
   fi
@@ -2580,7 +2587,7 @@ fi
     --min-findings-severity P1 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
     >/tmp/rb-lite-test.out
 
-  # The skeptic is detected across P0-P3 rather than through the floor, not through the floor. Routing it
+  # The skeptic is detected across P0-P3 rather than through the floor. Routing it
   # through the floor would hide it at P0/P1 and drop the advisory line exactly where a
   # raised floor makes the opinion most likely to go unread.
   assert_file_contains "$run_dir/log.txt" 'a skeptical reviewer reported findings'
@@ -2661,14 +2668,14 @@ test_a_skeptic_left_in_the_gating_file_is_flagged() {
   # What a 0.4.x user was told to write: the skeptic pasted into the reviewers file. It is a
   # GATING reviewer there, so its findings start rounds -- the split cannot fix an existing
   # file, only warn about it. Matched on the marker the documented skeptic prompt carries.
-  printf '%s\n' 'legacy-skeptic # prompts for OVER-SPECIFICATION' >"$repo/.rb-lite-reviewers"
+  printf '%s\n' 'legacy-skeptic -p "Review the diff for OVER-SPECIFICATION, not defects."' >"$repo/.rb-lite-reviewers"
   write_skeptics "$repo" 'printf "No findings.\n"'
 
   run_rb_lite "$repo" run --task "legacy layout" --max-rounds 1 --max-iters 1 \
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
 
   assert_file_contains "$run_dir/log.txt" 'looks like a skeptic'
-  assert_file_contains "$run_dir/log.txt" 'Move that line to'
+  assert_file_contains "$run_dir/log.txt" 'Move it to'
 }
 
 test_defect_findings_still_extend_the_run_with_a_skeptic_present() {
@@ -2890,7 +2897,7 @@ test_supplied_panel_keeps_the_at_least_one_rule() {
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
     >/tmp/rb-lite-test.out 2>/tmp/rb-lite-test.err || status=$?
 
-  # A supplied panel's members are opaque — rb-lite cannot know which is a skeptic — so
+  # A supplied panel's supplied gating members are opaque; skeptics are declared in their own file — so
   # the original at-least-one rule must be untouched there.
   assert_equals 0 "$status" "a supplied panel is unaffected by the skeptic rule"
 }

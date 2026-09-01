@@ -112,7 +112,7 @@ Options:
                           .rb-lite-skeptics; falls back to the built-in skeptic.
   --min-findings-severity LEVEL
                           Minimum DEFECT-reviewer finding severity that triggers another
-                          round. The built-in skeptic is advisory and matched off-floor.
+                          round. Skeptics are advisory and matched off-floor.
                           One of P0, P1, P2, P3. Default:
                           RB_LITE_MIN_FINDINGS_SEVERITY or P2.
   --max-production-lines N
@@ -126,7 +126,6 @@ Options:
                           first use, so pass every glob you want when overriding.
   --no-skeptic            Drop skeptics entirely -- the built-in one AND any supplied via
                           --skeptics-file.
-                          No effect when a reviewers file supplies the panel.
   --run-dir PATH          Store run artifacts in PATH. Default: RB_LITE_RUN_DIR or .rb-lite/runs/<id>.
   --branch NAME           Create and switch to NAME before running.
   -h, --help              Show this help.
@@ -197,8 +196,8 @@ the old strict P3 behavior.
 treat that as too old rather than assuming.
 
 Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
-three-reviewer panel with all models pinned — two defect reviewers plus a skeptic
-that reports over-specification only (CUT/SIMPLIFY/DEFER), dropped by --no-skeptic:
+three-reviewer panel with all models pinned — two GATING defect reviewers plus an
+advisory skeptic that reports over-specification only (CUT/SIMPLIFY/DEFER):
   codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
   set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<P0..P3 review prompt>" --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit,Bash" | jq -er '<result extractor>'
   set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<over-specification prompt>" --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep" --disallowedTools "Edit,Write,NotebookEdit,Bash,WebSearch,WebFetch" | jq -er '<result extractor>'
@@ -207,8 +206,9 @@ your codex CLI must be able to select it (verified on 0.146.0). If it cannot,
 that reviewer fails and the panel proceeds on the remaining ones — see the
 "N of 3 reviewers succeeded" line in the run log. jq extracts the default claude reviewer's
 final result event from claude --output-format stream-json and fails if claude
-reports is_error or an error/failure subtype. Override the panel by writing
-.rb-lite-reviewers.
+reports is_error or an error/failure subtype. Writing .rb-lite-reviewers overrides only
+the gating half; skeptics come from .rb-lite-skeptics, or the built-in one, until
+--no-skeptic drops them.
 The panel succeeds as long as at least one DEFECT reviewer exits 0; failed reviewers
 are noted in their per-reviewer markdown files but do not abort the run. The skeptic
 succeeding alone is a failed panel: it is forbidden from reporting defects, so a clean
@@ -805,18 +805,6 @@ load_reviewers() {
   # zero, one, or many skeptics all work and the panel-success rule stays one comparison.
   GATING_REVIEWER_COUNT=${#REVIEWERS[@]}
 
-  # Upgrade path: before the split, the documented way to keep counter-pressure with a custom
-  # panel was to paste the skeptic into .rb-lite-reviewers. That line is now a GATING reviewer
-  # -- it starts rounds, and with the defect reviewers clean it drives the run to exit 13. The
-  # split cannot fix an existing file, so say so rather than let it fail mysteriously.
-  local r
-  for r in ${REVIEWERS[@]+"${REVIEWERS[@]}"}; do
-    if [[ $r == *OVER-SPECIFICATION* ]]; then
-      log_msg "WARNING: a reviewer in $reviewers_file looks like a skeptic (it prompts for OVER-SPECIFICATION). Listed there it is a GATING reviewer: its findings start rounds and can reach consensus_failure (13). Move that line to $skeptics_file to make it advisory."
-      break
-    fi
-  done
-
   if [[ ${NO_SKEPTIC:-0} != 1 ]]; then
     local before_skeptics=${#REVIEWERS[@]}
     read_reviewer_file "$skeptics_file"
@@ -1255,6 +1243,22 @@ run_command() {
   # and nobody ever reads it. The skeptic clause is conditional on --no-skeptic alone: a
   # supplied gating panel still gets skeptics, so it is only their absence that makes the
   # reassurance false.
+  # Upgrade path: before the split, the documented way to keep counter-pressure with a custom
+  # panel was to paste the skeptic into .rb-lite-reviewers. That line is now a GATING reviewer
+  # -- it starts rounds, and with the defect reviewers clean it drives the run to exit 13. The
+  # split cannot fix a file already on disk, so say so. At preflight, not from load_reviewers:
+  # there it fired after round 1's implementer had already run (up to --implement-timeout of
+  # work) and then again every round.
+  #
+  # A LOOSE guess, deliberately warning-only. It matches the marker the documented 0.4.x
+  # skeptic prompt carries, so it catches a verbatim paste and misses a reworded or
+  # script-wrapped skeptic; it can also flag a defect reviewer that merely mentions the word.
+  # An error would break that panel for a guess, so it only ever advises.
+  if [[ ${NO_SKEPTIC:-0} != 1 && -f $reviewers_file ]] \
+     && grep -Fq -- 'OVER-SPECIFICATION' "$reviewers_file" 2>/dev/null; then
+    log_msg "WARNING: a line in $reviewers_file looks like a skeptic (it mentions OVER-SPECIFICATION). Listed there it is a GATING reviewer: its findings start rounds and can reach consensus_failure (13). Move it to $skeptics_file to make it advisory. This is a guess -- a reworded skeptic is not detected."
+  fi
+
   if [[ $min_findings_severity == P0 || $min_findings_severity == P1 ]]; then
     local ignored_severities=P2 skeptic_note=""
     [[ $min_findings_severity == P0 ]] && ignored_severities="P1 and P2"
