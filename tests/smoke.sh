@@ -1449,6 +1449,7 @@ test_reviewer_config_writes_per_reviewer_files() {
     printf '\n'
     printf 'reviewer-two\n'
   } >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" 'printf "No findings.\n"'
 
   run_rb_lite "$repo" run --task "per-reviewer" --max-rounds 1 --max-iters 1 \
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
@@ -1719,6 +1720,7 @@ fi
     printf "reviewer-a\n"
     printf "reviewer-b\n"
   } >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" 'printf "No findings.\n"'
 
   run_rb_lite "$repo" run --task "failed omitted" --max-rounds 2 --max-iters 2 \
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
@@ -1749,6 +1751,7 @@ printf "%s\n" "$count" >"$count_file"
     printf 'failing-reviewer\n'
     printf 'passing-reviewer\n'
   } >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" 'printf "No findings.\n"'
 
   run_rb_lite "$repo" run --task "stdout p-token" --max-rounds 2 --max-iters 1 \
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
@@ -1775,6 +1778,7 @@ printf "%s\n" "$count" >"$count_file"
     printf 'failing-reviewer\n'
     printf 'passing-reviewer\n'
   } >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" 'printf "No findings.\n"'
 
   run_rb_lite "$repo" run --task "stderr p-token" --max-rounds 2 --max-iters 1 \
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
@@ -1802,6 +1806,7 @@ printf "%s\n" "$count" >"$count_file"
     printf 'failing-reviewer\n'
     printf 'passing-reviewer\n'
   } >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" 'printf "No findings.\n"'
 
   run_rb_lite "$repo" run --task "partial failure" --max-rounds 1 --max-iters 1 \
     --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
@@ -2575,7 +2580,7 @@ fi
     --min-findings-severity P1 --implement-cmd 'fake-implementer' --run-dir "$run_dir" \
     >/tmp/rb-lite-test.out
 
-  # The skeptic is detected against a fixed P2 pattern, not through the floor. Routing it
+  # The skeptic is detected across P0-P3 rather than through the floor, not through the floor. Routing it
   # through the floor would hide it at P0/P1 and drop the advisory line exactly where a
   # raised floor makes the opinion most likely to go unread.
   assert_file_contains "$run_dir/log.txt" 'a skeptical reviewer reported findings'
@@ -2645,6 +2650,25 @@ test_raised_floor_warning_omits_the_skeptic_when_there_is_none() {
   assert_equals 0 "$status" "--no-skeptic with a raised floor still runs"
   assert_file_contains "$run_dir/log.txt" 'ignores P2 findings from the defect reviewers'
   assert_file_not_contains "$run_dir/log.txt" 'Skeptical reviewers are matched off-floor'
+}
+
+test_a_skeptic_left_in_the_gating_file_is_flagged() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/legacy-skeptic"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" legacy-skeptic 'printf "No findings.\n"'
+  # What a 0.4.x user was told to write: the skeptic pasted into the reviewers file. It is a
+  # GATING reviewer there, so its findings start rounds -- the split cannot fix an existing
+  # file, only warn about it. Matched on the marker the documented skeptic prompt carries.
+  printf '%s\n' 'legacy-skeptic # prompts for OVER-SPECIFICATION' >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" 'printf "No findings.\n"'
+
+  run_rb_lite "$repo" run --task "legacy layout" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains "$run_dir/log.txt" 'looks like a skeptic'
+  assert_file_contains "$run_dir/log.txt" 'Move that line to'
 }
 
 test_defect_findings_still_extend_the_run_with_a_skeptic_present() {
@@ -3119,6 +3143,7 @@ test_defect_findings_still_extend_the_run_with_a_skeptic_present
 test_supplied_panel_still_gets_counter_pressure
 test_supplied_skeptic_is_advisory
 test_skeptics_alone_are_not_a_reviewed_panel
+test_a_skeptic_left_in_the_gating_file_is_flagged
 test_budget_refuses_an_undiffable_base
 test_budget_charges_a_rename_to_its_destination_path
 test_skeptic_alone_is_not_a_reviewed_panel

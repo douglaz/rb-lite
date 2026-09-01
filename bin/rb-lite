@@ -124,7 +124,8 @@ Options:
   --budget-exclude GLOB   Path glob excluded from --max-production-lines. Repeatable.
                           Replaces the built-in defaults (test/fixture paths) on
                           first use, so pass every glob you want when overriding.
-  --no-skeptic            Drop the skeptical reviewer from the built-in panel.
+  --no-skeptic            Drop skeptics entirely -- the built-in one AND any supplied via
+                          --skeptics-file.
                           No effect when a reviewers file supplies the panel.
   --run-dir PATH          Store run artifacts in PATH. Default: RB_LITE_RUN_DIR or .rb-lite/runs/<id>.
   --branch NAME           Create and switch to NAME before running.
@@ -237,7 +238,8 @@ Exit codes:
   2   Usage error, including invalid flags or missing task files.
   3   Environment/preflight error, including git repo, branch creation, timeout support, or run-dir/log setup.
   10  Implementer loop failed; subprocess failures, timeouts, and max-iters are normalized to 10.
-  11  Review panel failed because zero reviewers exited 0.
+  11  Review panel failed: no GATING reviewer exited 0. Skeptics are advisory, so a panel
+      carried only by them has not reviewed the change.
   12  Max rounds hit before clean review.
   13  Consensus failure after repeated no-op implementer rounds with findings.
   14  Production line budget exceeded (--max-production-lines).
@@ -803,6 +805,18 @@ load_reviewers() {
   # zero, one, or many skeptics all work and the panel-success rule stays one comparison.
   GATING_REVIEWER_COUNT=${#REVIEWERS[@]}
 
+  # Upgrade path: before the split, the documented way to keep counter-pressure with a custom
+  # panel was to paste the skeptic into .rb-lite-reviewers. That line is now a GATING reviewer
+  # -- it starts rounds, and with the defect reviewers clean it drives the run to exit 13. The
+  # split cannot fix an existing file, so say so rather than let it fail mysteriously.
+  local r
+  for r in ${REVIEWERS[@]+"${REVIEWERS[@]}"}; do
+    if [[ $r == *OVER-SPECIFICATION* ]]; then
+      log_msg "WARNING: a reviewer in $reviewers_file looks like a skeptic (it prompts for OVER-SPECIFICATION). Listed there it is a GATING reviewer: its findings start rounds and can reach consensus_failure (13). Move that line to $skeptics_file to make it advisory."
+      break
+    fi
+  done
+
   if [[ ${NO_SKEPTIC:-0} != 1 ]]; then
     local before_skeptics=${#REVIEWERS[@]}
     read_reviewer_file "$skeptics_file"
@@ -871,6 +885,10 @@ review_has_findings() {
     (( rc == 0 )) || continue
     stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
     [[ -f $stdout ]] || continue
+    # Unreachable defaults, kept fail-closed and deliberately unequal: here an unset count
+    # must make NOTHING advisory (so `count`), while the survivor loop below must count NO
+    # gating survivors (so `0`). Same direction, opposite literal, because the comparisons
+    # are opposite. load_reviewers always sets it, and a zero count fails the panel first.
     if (( idx > ${GATING_REVIEWER_COUNT:-count} )); then
       grep -Eq "${SKEPTIC_FINDINGS_PATTERN:-$FINDINGS_SEVERITY_PATTERN}" "$stdout" \
         && skeptic_only=1
@@ -896,8 +914,8 @@ run_review_panel() {
   local round=$2
   local base=$3
   local reviewers_file=$4
-  local skeptics_file=$6
   local reviewer_timeout=$5
+  local skeptics_file=$6
   local count idx command stdout stderr pid failed succeeded rc
   local -a pids reviewer_argv
 
@@ -1234,8 +1252,9 @@ run_command() {
   # what it does now that the built-in skeptic is matched off-floor. Named exactly: a P0
   # floor drops P1 as well as P2, and an ignored finding reaches the implementer only if
   # some OTHER finding keeps that round alive — if it is the only one, the run exits clean
-  # and nobody ever reads it. The skeptic clause is conditional because with --no-skeptic
-  # or a supplied panel there is no built-in skeptic to be unaffected.
+  # and nobody ever reads it. The skeptic clause is conditional on --no-skeptic alone: a
+  # supplied gating panel still gets skeptics, so it is only their absence that makes the
+  # reassurance false.
   if [[ $min_findings_severity == P0 || $min_findings_severity == P1 ]]; then
     local ignored_severities=P2 skeptic_note=""
     [[ $min_findings_severity == P0 ]] && ignored_severities="P1 and P2"

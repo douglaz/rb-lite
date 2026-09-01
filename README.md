@@ -196,14 +196,14 @@ which is what keeps a run from ratcheting. `--no-skeptic` drops it.
 
 Skeptics are **advisory**: their findings reach the implementer in every round the
 defect reviewers keep alive, and are always written to the run dir, but they never
-start a round of their own and never block a clean verdict. Its prompt tags every
-finding `P2` and the default floor is `P2`, so without this it could not let a run
-converge at all — across eight runs of one 2026-08 drive the panel went clean zero
-times and every run ended at max-rounds, escalating to a human. A reviewer whose job
-is to argue for less work must not be the reason more work happens. When it is the
-only reviewer with findings at the configured floor, the log says so and names its
-file. It is detected against a fixed `P2` pattern rather than through the floor, so
-raising the floor does not also hide the fact that it spoke.
+start a round of their own and never block a clean verdict. The built-in skeptic's
+prompt tags every finding `P2` and the default floor is `P2`, so without this it could
+not let a run converge at all — across eight runs of one 2026-08 drive the panel went
+clean zero times and every run ended at max-rounds, escalating to a human. A reviewer
+whose job is to argue for less work must not be the reason more work happens. When a
+skeptic reports and no gating reviewer does, the log says so and points at that round's
+review files. Skeptics are matched across `P0`–`P3` rather than through the floor, so
+raising the floor does not also hide the fact that one spoke.
 
 The panel has **two axes, in two files**, because rb-lite cannot tell a skeptic from a
 defect reviewer by looking at it — both are opaque shell commands emitting
@@ -213,6 +213,13 @@ severity-tagged lines, so identity has to be declared rather than inferred.
 | --- | --- | --- |
 | `.rb-lite-reviewers` | gating | start rounds |
 | `.rb-lite-skeptics` | advisory | inform rounds that happen; never start one |
+
+**Upgrading from 0.4.x or earlier:** if you followed the old advice and pasted a skeptic
+into `.rb-lite-reviewers`, **move that line to `.rb-lite-skeptics`**. Left where it is it
+is a gating reviewer — its findings start rounds, and with your defect reviewers clean it
+drives the run to `consensus_failure` (13) — and you now also get the built-in skeptic
+alongside it. rb-lite warns when it spots one there. Custom panels that never carried a
+skeptic need no change, but will gain the built-in one; `--no-skeptic` opts out.
 
 Either file falls back to its built-in default when absent, empty, or comments-only. So
 supplying a gating panel **keeps** your counter-pressure, and a skeptic you declare is
@@ -374,7 +381,7 @@ or re-derive the baseline, not to raise `N`.
 | `2`  | `usage_error` | CLI parsing failure, invalid value, conflicting flags |
 | `3`  | `env_error` | Not in git repo, missing tool, run-dir setup failure |
 | `10` | `implementer_failed` | Implementer subprocess non-zero (incl. timeout 124/137) or max-iters without stabilizing. Transient provider errors (rate limit / overloaded / 5xx / network) are retried with backoff first — see `RB_LITE_API_RETRY_DELAYS` / `RB_LITE_API_MAX_RETRIES` |
-| `11` | `review_panel_failed` | Zero reviewers exited 0 |
+| `11` | `review_panel_failed` | No **gating** reviewer exited 0 — either none succeeded, or only advisory skeptics did, which is not a review |
 | `12` | `max_rounds_hit` | Hit `--max-rounds` before convergence |
 | `13` | `consensus_failure` | Hit `--max-noop-rounds` consecutive no-op rounds with reviewers still finding things |
 | `14` | `budget_exceeded` | Added production lines exceeded `--max-production-lines` |
