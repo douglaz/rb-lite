@@ -886,13 +886,17 @@ review_has_findings() {
     return 0
   done
   # Say so rather than converging silently on an unread opinion. The message claims only
-  # what this function knows: the skeptic reported something and nothing gated the round.
-  # It deliberately does NOT say the skeptic is the only reviewer with anything to say —
-  # the skeptic is matched off-floor, so at a raised floor a defect reviewer's finding of
-  # the very same severity is excluded here, and a reviewer that exited non-zero was
-  # skipped before its output was read. Either would make an "only" claim false.
+  # what this function knows, and "no gating reviewer reported findings" was more than that:
+  # the skeptic is matched off-floor, so at a P0/P1 floor a gating reviewer's P2 is skipped
+  # by the loop above without being counted here, and a reviewer that exited non-zero was
+  # skipped before its output was read at all. Either makes an absence claim false, and the
+  # first turns a deliberately ignored defect into a reported non-existent one. So the
+  # message states the floor test it actually performed. `MIN_FINDINGS_SEVERITY`, the
+  # global set in main, rather than main's `min_findings_severity` local -- that one is
+  # visible here only by dynamic scoping, and the two log_msg calls in run_review_panel
+  # already use the global.
   if [[ -n $skeptic_only ]]; then
-    log_msg "round $round: a skeptical reviewer reported findings and no gating reviewer did; skeptic findings are advisory and do not extend the run (reviewers $(( GATING_REVIEWER_COUNT + 1 ))+ in $RUN_DIR/review-round-$round-*.md)"
+    log_msg "round $round: a skeptical reviewer reported findings and no gating finding met the $MIN_FINDINGS_SEVERITY floor; skeptic findings are advisory and do not extend the run (reviewers $(( GATING_REVIEWER_COUNT + 1 ))+ in $RUN_DIR/review-round-$round-*.md)"
   fi
   return 1
 }
@@ -1254,7 +1258,13 @@ run_command() {
   # skeptic prompt carries, so it catches a verbatim paste and misses a reworded or
   # script-wrapped skeptic; it can also flag a defect reviewer that merely mentions the word.
   # An error would break that panel for a guess, so it only ever advises.
-  if [[ ${NO_SKEPTIC:-0} != 1 && -f $reviewers_file ]] \
+  # NOT gated on --no-skeptic, and that is the whole point. --no-skeptic stops the SKEPTICS
+  # file from being read; the reviewers file is read unconditionally either way. So a 0.4.x
+  # skeptic pasted into .rb-lite-reviewers still runs as a GATING reviewer under --no-skeptic
+  # -- the one case where the user believes they have turned skeptics off and has not. Gating
+  # the warning on the flag suppressed it exactly there, and the README promises it
+  # unconditionally.
+  if [[ -f $reviewers_file ]] \
      && grep -Fq -- 'OVER-SPECIFICATION' "$reviewers_file" 2>/dev/null; then
     log_msg "WARNING: a line in $reviewers_file looks like a skeptic (it mentions OVER-SPECIFICATION). Listed there it is a GATING reviewer: its findings start rounds and can reach consensus_failure (13). Move it to $skeptics_file to make it advisory. This is a guess -- a reworded skeptic is not detected."
   fi

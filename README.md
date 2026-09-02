@@ -201,8 +201,9 @@ prompt tags every finding `P2` and the default floor is `P2`, so without this it
 not let a run converge at all — across eight runs of one 2026-08 drive the panel went
 clean zero times and every run ended at max-rounds, escalating to a human. A reviewer
 whose job is to argue for less work must not be the reason more work happens. When a
-skeptic reports and no gating reviewer does, the log says so and points at that round's
-review files. Skeptics are matched across `P0`–`P3` rather than through the floor, so
+skeptic reports and no gating finding meets the floor, the log says so and points at that
+round's review files — stated as the floor test it performed, not as an absence, because a
+raised floor also excludes a gating reviewer's lower-severity finding. Skeptics are matched across `P0`–`P3` rather than through the floor, so
 raising the floor does not also hide the fact that one spoke.
 
 The panel has **two axes, in two files**, because rb-lite cannot tell a skeptic from a
@@ -410,7 +411,8 @@ the JSON on success; failure messages still go to stderr.
 - `RB_LITE_IMPLEMENTER` (single preset or comma-separated preset cycle)
 - `RB_LITE_IMPLEMENT_CMD`
 - `RB_LITE_SESSION_REGEX`
-- `RB_LITE_REVIEWERS_FILE`
+- `RB_LITE_REVIEWERS_FILE` (gating panel)
+- `RB_LITE_SKEPTICS_FILE` (advisory panel; independent of the gating file, and dropped entirely by `--no-skeptic`)
 - `RB_LITE_MIN_FINDINGS_SEVERITY`
 - `RB_LITE_RUN_DIR`
 - `RB_LITE_API_RETRY_DELAYS` (space-separated backoff seconds before retrying an implementer iteration that failed with a transient provider error; last value repeats; default `10 30 60`; structured `retry_after` values are used as a delay floor)

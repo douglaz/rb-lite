@@ -2678,6 +2678,48 @@ test_a_skeptic_left_in_the_gating_file_is_flagged() {
   assert_file_contains "$run_dir/log.txt" 'Move it to'
 }
 
+# The advisory-only message used to say "no gating reviewer reported findings", which is a
+# different and sometimes false claim: the skeptic is matched off-floor, so at a P1 floor a
+# gating reviewer's P2 is skipped without being counted, and the message then reported a
+# deliberately ignored defect as a non-existent one. Asserting the floor by name also pins
+# that the message reads the GLOBAL `MIN_FINDINGS_SEVERITY` -- main's same-named local is
+# visible there only by dynamic scoping, and an unset global would print "the  floor".
+test_advisory_only_message_names_the_floor_not_an_absence() {
+  local repo run_dir rc=0
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/advisory-message-floor"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" subfloor-reviewer 'printf "P2 the retry path is untested\n"'
+  write_fake "$repo" my-skeptic 'printf "P2: CUT the retry wrapper\n"'
+  printf '%s\n' subfloor-reviewer >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" my-skeptic
+
+  run_rb_lite "$repo" run --task "subfloor gating finding" --max-rounds 2 --max-iters 1 \
+    --min-findings-severity P1 --implement-cmd 'fake-implementer' \
+    --run-dir "$run_dir" >/tmp/rb-lite-test.out || rc=$?
+
+  (( rc == 0 )) || fail "a sub-floor gating finding must not extend the run (exit $rc)"
+  assert_file_contains "$run_dir/log.txt" 'no gating finding met the P1 floor'
+}
+
+# --no-skeptic used to suppress that warning, and this is precisely the run where it must
+# not: the flag stops the SKEPTICS file from being read, while the reviewers file is read
+# either way -- so the pasted legacy skeptic still gates, and the user believes they have
+# turned skeptics off. The warning was silent in the one configuration that needed it.
+test_the_legacy_skeptic_warning_survives_no_skeptic() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/legacy-skeptic-no-skeptic"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" legacy-skeptic 'printf "No findings.\n"'
+  printf '%s\n' 'legacy-skeptic -p "Review the diff for OVER-SPECIFICATION, not defects."' >"$repo/.rb-lite-reviewers"
+
+  run_rb_lite "$repo" run --task "legacy layout, skeptics off" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --no-skeptic --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains "$run_dir/log.txt" 'looks like a skeptic'
+}
+
 test_defect_findings_still_extend_the_run_with_a_skeptic_present() {
   local repo run_dir
   repo=$(new_repo)
@@ -2752,6 +2794,71 @@ test_supplied_skeptic_is_advisory() {
   assert_file_contains "$run_dir/log.txt" 'skeptic findings are advisory'
   if grep -q 'round 2 implementer' "$run_dir/log.txt"; then
     fail "a declared skeptic must not start a round"
+  fi
+}
+
+# `--skeptics-file` and `RB_LITE_SKEPTICS_FILE` were the two user-facing inputs of the
+# advisory axis with nothing exercising them: every other skeptic fixture reaches the panel
+# through the DEFAULT `.rb-lite-skeptics` path, so the flag parser and the env default were
+# both unverified and a typo storing either into `reviewers_file` passed the whole suite.
+#
+# The shape below fails on all three ways it can break, and hangs on none:
+#   flag ignored      -> the default `.rb-lite-skeptics` stub runs, it says "No findings",
+#                        and the advisory line never appears -> assertion fails.
+#   flag misrouted    -> the custom skeptic lands in the GATING panel, its `P2: CUT` starts
+#                        rounds, and round 2 appears -> assertion fails.
+#   flag honoured     -> P2: CUT is advisory, panel clean, one round.
+# The default-path stub is what keeps the first case a failure rather than a fallback to the
+# built-in skeptic, which would shell out to the real `claude` and hang the suite on auth.
+test_skeptics_file_flag_targets_the_advisory_axis() {
+  local repo run_dir rc=0
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/skeptics-file-flag"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_fake "$repo" custom-skeptic 'printf "P2: CUT the retry wrapper\n"'
+  write_fake "$repo" default-skeptic 'printf "No findings.\n"'
+  printf '%s\n' fake-reviewer >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" default-skeptic
+  printf '%s\n' custom-skeptic >"$repo/elsewhere-skeptics"
+
+  run_rb_lite "$repo" run --task "skeptics-file flag" --max-rounds 4 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --skeptics-file elsewhere-skeptics \
+    --run-dir "$run_dir" >/tmp/rb-lite-test.out || rc=$?
+
+  (( rc == 0 )) || fail "--skeptics-file panel must stay advisory (exit $rc)"
+  assert_file_contains "$run_dir/log.txt" 'skeptic findings are advisory'
+  assert_file_contains "$run_dir/log.txt" 'review panel clean'
+  if grep -q 'round 2 implementer' "$run_dir/log.txt"; then
+    fail "--skeptics-file must not put its panel on the gating axis"
+  fi
+}
+
+test_skeptics_file_env_targets_the_advisory_axis() {
+  local repo run_dir rc=0
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/skeptics-file-env"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  write_fake "$repo" custom-skeptic 'printf "P2: CUT the retry wrapper\n"'
+  write_fake "$repo" default-skeptic 'printf "No findings.\n"'
+  printf '%s\n' fake-reviewer >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" default-skeptic
+  printf '%s\n' custom-skeptic >"$repo/elsewhere-skeptics"
+
+  # Invoked directly rather than through run_rb_lite, which unsets this var by design.
+  (
+    cd "$repo"
+    unset RB_LITE_REVIEWERS_FILE RB_LITE_IMPLEMENT_CMD RB_LITE_IMPLEMENTER
+    PATH="$repo/fakes:$PATH" RB_LITE_SKEPTICS_FILE=elsewhere-skeptics \
+      "$repo/bin/rb-lite" run --task "skeptics-file env" --max-rounds 4 --max-iters 1 \
+      --implement-cmd 'fake-implementer' --run-dir "$run_dir"
+  ) >/tmp/rb-lite-test.out || rc=$?
+
+  (( rc == 0 )) || fail "RB_LITE_SKEPTICS_FILE panel must stay advisory (exit $rc)"
+  assert_file_contains "$run_dir/log.txt" 'skeptic findings are advisory'
+  if grep -q 'round 2 implementer' "$run_dir/log.txt"; then
+    fail "RB_LITE_SKEPTICS_FILE must not put its panel on the gating axis"
   fi
 }
 
@@ -3150,7 +3257,11 @@ test_defect_findings_still_extend_the_run_with_a_skeptic_present
 test_supplied_panel_still_gets_counter_pressure
 test_supplied_skeptic_is_advisory
 test_skeptics_alone_are_not_a_reviewed_panel
+test_skeptics_file_flag_targets_the_advisory_axis
+test_skeptics_file_env_targets_the_advisory_axis
 test_a_skeptic_left_in_the_gating_file_is_flagged
+test_the_legacy_skeptic_warning_survives_no_skeptic
+test_advisory_only_message_names_the_floor_not_an_absence
 test_budget_refuses_an_undiffable_base
 test_budget_charges_a_rename_to_its_destination_path
 test_skeptic_alone_is_not_a_reviewed_panel
