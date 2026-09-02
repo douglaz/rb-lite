@@ -5,7 +5,7 @@ PROGRAM=${0##*/}
 # Bumped deliberately, and reported by `--version` so a caller can require a floor.
 # A build without this command predates it; callers treat `unknown command: --version`
 # as "too old" rather than assuming a capability is present.
-RB_LITE_VERSION=0.4.0
+RB_LITE_VERSION=0.5.0
 readonly RB_LITE_VERSION
 TIMEOUT_KILL_AFTER=5s
 readonly TIMEOUT_KILL_AFTER
@@ -105,9 +105,14 @@ Options:
   --implement-cmd CMD     Raw implementer shell command escape hatch. Takes
                           precedence over implementer presets. Default:
                           RB_LITE_IMPLEMENT_CMD.
-  --reviewers-file PATH   Reviewer command file. Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
+  --reviewers-file PATH   Gating reviewer command file; their findings start rounds.
+                          Default: RB_LITE_REVIEWERS_FILE or .rb-lite-reviewers.
+  --skeptics-file PATH    Advisory reviewer command file; their findings inform rounds that
+                          happen but never start one. Default: RB_LITE_SKEPTICS_FILE or
+                          .rb-lite-skeptics; falls back to the built-in skeptic.
   --min-findings-severity LEVEL
-                          Minimum reviewer finding severity that triggers another round.
+                          Minimum DEFECT-reviewer finding severity that triggers another
+                          round. Skeptics are advisory and matched off-floor.
                           One of P0, P1, P2, P3. Default:
                           RB_LITE_MIN_FINDINGS_SEVERITY or P2.
   --max-production-lines N
@@ -119,8 +124,8 @@ Options:
   --budget-exclude GLOB   Path glob excluded from --max-production-lines. Repeatable.
                           Replaces the built-in defaults (test/fixture paths) on
                           first use, so pass every glob you want when overriding.
-  --no-skeptic            Drop the skeptical reviewer from the built-in panel.
-                          No effect when a reviewers file supplies the panel.
+  --no-skeptic            Drop skeptics entirely -- the built-in one AND any supplied via
+                          --skeptics-file.
   --run-dir PATH          Store run artifacts in PATH. Default: RB_LITE_RUN_DIR or .rb-lite/runs/<id>.
   --branch NAME           Create and switch to NAME before running.
   -h, --help              Show this help.
@@ -143,7 +148,8 @@ Environment:
   RB_LITE_IMPLEMENT_CMD   Shell command run for each implementer iteration.
   RB_LITE_PREV_SESSION    Exported to the implementer with the prior same-round session ID.
   RB_LITE_SESSION_REGEX   Bash ERE for session IDs in implementer stderr; empty disables capture.
-  RB_LITE_REVIEWERS_FILE  File with one reviewer shell command per non-comment line.
+  RB_LITE_REVIEWERS_FILE  File with one gating reviewer shell command per non-comment line.
+  RB_LITE_SKEPTICS_FILE   File with one advisory reviewer shell command per non-comment line.
   RB_LITE_MIN_FINDINGS_SEVERITY
                           Default minimum reviewer finding severity. Default: P2.
   RB_LITE_RUN_DIR         Explicit run artifact directory.
@@ -190,8 +196,8 @@ the old strict P3 behavior.
 treat that as too old rather than assuming.
 
 Reviewer commands run concurrently. If no reviewers file exists, rb-lite runs a
-three-reviewer panel with all models pinned — two defect reviewers plus a skeptic
-that reports over-specification only (CUT/SIMPLIFY/DEFER), dropped by --no-skeptic:
+three-reviewer panel with all models pinned — two GATING defect reviewers plus an
+advisory skeptic that reports over-specification only (CUT/SIMPLIFY/DEFER):
   codex review --base "$BASE" -c 'model="gpt-5.6-sol"'
   set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<P0..P3 review prompt>" --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit,Bash" | jq -er '<result extractor>'
   set -o pipefail; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "<over-specification prompt>" --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep" --disallowedTools "Edit,Write,NotebookEdit,Bash,WebSearch,WebFetch" | jq -er '<result extractor>'
@@ -200,8 +206,9 @@ your codex CLI must be able to select it (verified on 0.146.0). If it cannot,
 that reviewer fails and the panel proceeds on the remaining ones — see the
 "N of 3 reviewers succeeded" line in the run log. jq extracts the default claude reviewer's
 final result event from claude --output-format stream-json and fails if claude
-reports is_error or an error/failure subtype. Override the panel by writing
-.rb-lite-reviewers.
+reports is_error or an error/failure subtype. Writing .rb-lite-reviewers overrides only
+the gating half; skeptics come from .rb-lite-skeptics, or the built-in one, until
+--no-skeptic drops them.
 The panel succeeds as long as at least one DEFECT reviewer exits 0; failed reviewers
 are noted in their per-reviewer markdown files but do not abort the run. The skeptic
 succeeding alone is a failed panel: it is forbidden from reporting defects, so a clean
@@ -231,7 +238,8 @@ Exit codes:
   2   Usage error, including invalid flags or missing task files.
   3   Environment/preflight error, including git repo, branch creation, timeout support, or run-dir/log setup.
   10  Implementer loop failed; subprocess failures, timeouts, and max-iters are normalized to 10.
-  11  Review panel failed because zero reviewers exited 0.
+  11  Review panel failed: no GATING reviewer exited 0. Skeptics are advisory, so a panel
+      carried only by them has not reviewed the change.
   12  Max rounds hit before clean review.
   13  Consensus failure after repeated no-op implementer rounds with findings.
   14  Production line budget exceeded (--max-production-lines).
@@ -750,19 +758,33 @@ run_implementer_loop() {
   return 1
 }
 
+read_reviewer_file() {  # $1 = path; appends non-blank, non-comment lines to REVIEWERS
+  [[ -f $1 ]] || return 0
+  local line
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z ${line//[[:space:]]/} ]] && continue
+    [[ $line =~ ^[[:space:]]*# ]] && continue
+    REVIEWERS+=("$line")
+  done <"$1"
+}
+
+# The panel has two independent axes, and they are separate FILES rather than positions in
+# one, because rb-lite cannot tell a skeptic from a defect reviewer by looking at it: both
+# are opaque shell commands emitting severity-tagged lines. Identity has to be declared.
+#
+# Gating reviewers hunt defects and their findings start rounds. Skeptics hunt
+# over-specification; theirs inform rounds that happen and never start one. Before these
+# were separate files, `--reviewers-file` replaced BOTH, so overriding the defect panel
+# silently deleted the panel's only counter-pressure — and the documented workaround,
+# carrying a skeptic into the reviewers file, made it gating again and drove clean runs to
+# `consensus_failure`. Splitting the files removes the workaround and the trap together.
 load_reviewers() {
   local reviewers_file=$1
+  local skeptics_file=$2
   REVIEWERS=()
-  SKEPTIC_REVIEWER_INDEX=
+  GATING_REVIEWER_COUNT=0
 
-  if [[ -f $reviewers_file ]]; then
-    local line
-    while IFS= read -r line || [[ -n $line ]]; do
-      [[ -z ${line//[[:space:]]/} ]] && continue
-      [[ $line =~ ^[[:space:]]*# ]] && continue
-      REVIEWERS+=("$line")
-    done <"$reviewers_file"
-  fi
+  read_reviewer_file "$reviewers_file"
 
   if ((${#REVIEWERS[@]} == 0)); then
     # Both default reviewers hunt what is MISSING, so every finding they raise argues for
@@ -777,13 +799,18 @@ load_reviewers() {
       'codex review --base "$BASE" -c '\''model="gpt-5.6-sol"'\'''
       'set -o pipefail; { git diff "$BASE" || printf "%s\\n" "rb-lite: could not compute a diff against $BASE (see the error above); the reviewer cannot see the change set"; } >"$RUN_DIR/reviewer-diff-round-$ROUND.patch" 2>&1; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE. The complete diff is in $RUN_DIR/reviewer-diff-round-$ROUND.patch — read that file first, then read any source it touches to verify claims. If that file contains an rb-lite error instead of a diff, report exactly that as a P1 and do not claim the change is clean. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/ — these are runtime/orchestration state, not code under review. List actionable findings, each on its own line and prefixed with a severity tag: P0 (must-fix correctness/security), P1 (should-fix before merge), P2 (nice-to-have), P3 (nit). Before asserting that the diff violates or overstates an invariant, or any claim about behavior in code the diff does not show, VERIFY it by reading that code and cite file:line; do not infer a cross-file property from the diff alone, and if you cannot verify such a claim mark it a QUESTION not a finding. If there are no actionable findings, output exactly: No findings. Do not modify any files." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep,WebSearch,WebFetch" --disallowedTools "Edit,Write,NotebookEdit,Bash" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "claude reviewer returned is_error") else (.result // empty) end else empty end'\'''
     )
-    if [[ ${NO_SKEPTIC:-0} != 1 ]]; then
-      # 1-based index of the skeptic in the built-in panel. It is recorded because the
-      # skeptic is forbidden from reporting defects, so its success alone is NOT a
-      # reviewed change: a panel where both defect reviewers died and only the skeptic
-      # answered would otherwise report `clean` with nothing having looked for bugs.
-      # Only ever set for the built-in panel — a supplied file's members are opaque.
-      SKEPTIC_REVIEWER_INDEX=$(( ${#REVIEWERS[@]} + 1 ))
+  fi
+
+  # Everything appended past this point is advisory. A boundary rather than a position, so
+  # zero, one, or many skeptics all work and the panel-success rule stays one comparison.
+  GATING_REVIEWER_COUNT=${#REVIEWERS[@]}
+
+  if [[ ${NO_SKEPTIC:-0} != 1 ]]; then
+    local before_skeptics=${#REVIEWERS[@]}
+    read_reviewer_file "$skeptics_file"
+    if (( ${#REVIEWERS[@]} == before_skeptics )); then
+      # No skeptics file, or one holding only blanks and comments — same fallback rule the
+      # reviewers file uses, so an empty file never silently means "no counter-pressure".
       REVIEWERS+=(
         'set -o pipefail; { git diff "$BASE" || printf "%s\\n" "rb-lite: could not compute a diff against $BASE (see the error above); the reviewer cannot see the change set"; } >"$RUN_DIR/skeptic-diff-round-$ROUND.patch" 2>&1; CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p "Read AGENTS.md if present, then review the changes in this git repository since base ref $BASE for OVER-SPECIFICATION, not for defects. The complete diff is in $RUN_DIR/skeptic-diff-round-$ROUND.patch — read that file first, then read any source it touches. If that file contains an rb-lite error instead of a diff, report exactly that as a P1 and do not claim the change is clean. Ignore any changes under .rb-lite/, .ralph-burning/, or .git/ralph-burning-live/. Flag any mechanism, handling, config, abstraction, or defensive check that is NOT required for correctness, security, or data safety and could be cut, simplified, or deferred. For each, state what it is, what already covers the case, and your recommendation. Judge against the change'\''s stated goal: a guard against a caller the threat model does not include is over-specification even when the guard is correct. Tag each finding on its own line with one of P2: CUT, P2: SIMPLIFY, or P2: DEFER. Do not report missing behavior, bugs, or style — other reviewers own those. If the change is already minimal for its goal, output exactly: No findings. Do not modify any files." --model claude-opus-5 --output-format stream-json --verbose --allowedTools "Read,Glob,Grep" --disallowedTools "Edit,Write,NotebookEdit,Bash,WebSearch,WebFetch" | jq -er '\''if .type == "result" then if ((.is_error // false) or (((.subtype // "") | tostring) | test("error|fail"))) then error(.result // "skeptic reviewer returned is_error") else (.result // empty) end else empty end'\'''
       )
@@ -837,7 +864,6 @@ write_review_files() {
 # Its findings still reach the implementer in every round the defect reviewers keep alive,
 # and still land in the run dir; they just never start a round of their own. A reviewer that
 # argues for less work must not be the reason more work happens.
-SKEPTIC_ADVISORY_LOGGED=""
 review_has_findings() {
   local round=$1
   local count=$2
@@ -847,7 +873,11 @@ review_has_findings() {
     (( rc == 0 )) || continue
     stdout="$RUN_DIR/reviewer-round-${round}-${idx}.stdout"
     [[ -f $stdout ]] || continue
-    if [[ -n ${SKEPTIC_REVIEWER_INDEX:-} ]] && (( idx == SKEPTIC_REVIEWER_INDEX )); then
+    # Unreachable defaults, kept fail-closed and deliberately unequal: here an unset count
+    # must make NOTHING advisory (so `count`), while the survivor loop below must count NO
+    # gating survivors (so `0`). Same direction, opposite literal, because the comparisons
+    # are opposite. load_reviewers always sets it, and a zero count fails the panel first.
+    if (( idx > ${GATING_REVIEWER_COUNT:-count} )); then
       grep -Eq "${SKEPTIC_FINDINGS_PATTERN:-$FINDINGS_SEVERITY_PATTERN}" "$stdout" \
         && skeptic_only=1
       continue
@@ -855,13 +885,18 @@ review_has_findings() {
     grep -Eq "$FINDINGS_SEVERITY_PATTERN" "$stdout" || continue
     return 0
   done
-  # Say so once per round rather than converging silently on an unread opinion. Scoped to
-  # the floor on purpose: a defect reviewer's sub-floor finding is also present but was
-  # deliberately not counted, so claiming the skeptic is the only one with anything to say
-  # would be false.
+  # Say so rather than converging silently on an unread opinion. The message claims only
+  # what this function knows, and "no gating reviewer reported findings" was more than that:
+  # the skeptic is matched off-floor, so at a P0/P1 floor a gating reviewer's P2 is skipped
+  # by the loop above without being counted here, and a reviewer that exited non-zero was
+  # skipped before its output was read at all. Either makes an absence claim false, and the
+  # first turns a deliberately ignored defect into a reported non-existent one. So the
+  # message states the floor test it actually performed. `MIN_FINDINGS_SEVERITY`, the
+  # global set in main, rather than main's `min_findings_severity` local -- that one is
+  # visible here only by dynamic scoping, and the two log_msg calls in run_review_panel
+  # already use the global.
   if [[ -n $skeptic_only ]]; then
-    log_msg "round $round: at the $MIN_FINDINGS_SEVERITY floor only the skeptical reviewer has findings; they are advisory and do not extend the run (see $RUN_DIR/review-round-$round-${SKEPTIC_REVIEWER_INDEX}.md)"
-    SKEPTIC_ADVISORY_LOGGED=1
+    log_msg "round $round: a skeptical reviewer reported findings and no gating finding met the $MIN_FINDINGS_SEVERITY floor; skeptic findings are advisory and do not extend the run (reviewers $(( GATING_REVIEWER_COUNT + 1 ))+ in $RUN_DIR/review-round-$round-*.md)"
   fi
   return 1
 }
@@ -872,13 +907,14 @@ run_review_panel() {
   local base=$3
   local reviewers_file=$4
   local reviewer_timeout=$5
+  local skeptics_file=$6
   local count idx command stdout stderr pid failed succeeded rc
   local -a pids reviewer_argv
 
   REVIEW_PANEL_RESULT=failed
   REVIEW_PANEL_FAILURE_EXIT=0
   REVIEWER_RCS=()
-  load_reviewers "$reviewers_file"
+  load_reviewers "$reviewers_file" "$skeptics_file"
   count=${#REVIEWERS[@]}
   pids=()
   log_msg "round $round review panel starting with $count reviewer(s)"
@@ -923,18 +959,22 @@ run_review_panel() {
   write_review_files "$round" "$count"
   SUMMARY_ROUNDS=$round
 
-  if (( succeeded == 0 )); then
-    log_msg "round $round review panel failed: 0 of $count reviewers succeeded (last exit $failed)"
-    REVIEW_PANEL_FAILURE_EXIT=$failed
-    return 1
-  fi
-
-  # A clean verdict has to come from something that was looking for defects. The skeptic
-  # only reports over-specification, so if it is the sole survivor the change has not been
-  # reviewed at all — treat that as a failed panel rather than a quiet exit 0.
-  if [[ -n ${SKEPTIC_REVIEWER_INDEX:-} ]] && (( succeeded == 1 )) \
-     && (( ${REVIEWER_RCS[$((SKEPTIC_REVIEWER_INDEX - 1))]:-1} == 0 )); then
-    log_msg "round $round review panel failed: only the skeptical reviewer succeeded, and it does not report defects (last exit $failed)"
+  # A clean verdict has to come from something that was looking for defects. Skeptics are
+  # forbidden from reporting them, so a panel carried entirely by skeptics has not reviewed
+  # the change at all — that is a failed panel, not a quiet exit 0. Counted rather than
+  # position-matched: the old rule tested "exactly one succeeded and it was the skeptic",
+  # which passed as a reviewed panel when two skeptics answered and both defect reviewers
+  # died.
+  local gating_succeeded=0 gidx
+  for ((gidx = 1; gidx <= count && gidx <= ${GATING_REVIEWER_COUNT:-0}; gidx++)); do
+    (( ${REVIEWER_RCS[$((gidx - 1))]:-1} == 0 )) && gating_succeeded=$((gating_succeeded + 1))
+  done
+  if (( gating_succeeded == 0 )); then
+    if (( succeeded == 0 )); then
+      log_msg "round $round review panel failed: 0 of $count reviewers succeeded (last exit $failed)"
+    else
+      log_msg "round $round review panel failed: only advisory (skeptical) reviewers succeeded, and they do not report defects (last exit $failed)"
+    fi
     REVIEW_PANEL_FAILURE_EXIT=$failed
     return 1
   fi
@@ -967,6 +1007,7 @@ run_command() {
   local current_implementer_preset=
   local implementer_preset_words=
   local reviewers_file=${RB_LITE_REVIEWERS_FILE:-.rb-lite-reviewers}
+  local skeptics_file=${RB_LITE_SKEPTICS_FILE:-.rb-lite-skeptics}
   local min_findings_severity=${RB_LITE_MIN_FINDINGS_SEVERITY:-P2}
   local findings_severity_pattern=
   local findings_severity_digits=
@@ -1050,6 +1091,11 @@ run_command() {
       --reviewers-file)
         (($# >= 2)) || die "--reviewers-file requires a value"
         reviewers_file=$2
+        shift 2
+        ;;
+      --skeptics-file)
+        (($# >= 2)) || die "--skeptics-file requires a value"
+        skeptics_file=$2
         shift 2
         ;;
       --min-findings-severity)
@@ -1151,12 +1197,13 @@ run_command() {
   findings_severity_pattern=$(build_findings_pattern "$findings_severity_digits")
   MIN_FINDINGS_SEVERITY=$min_findings_severity
   FINDINGS_SEVERITY_PATTERN=$findings_severity_pattern
-  # The skeptic's prompt mandates P2, so it is detected against a fixed P2 pattern rather
-  # than through the floor. At a P0/P1 floor the floor pattern hides it, and the advisory
-  # log line — the one thing standing between its opinion and a silent clean verdict —
-  # would never print, exactly where a raised floor makes it most likely to be missed.
-  # Built by the same function so the two patterns cannot drift apart.
-  SKEPTIC_FINDINGS_PATTERN=$(build_findings_pattern 2)
+  # The skeptic is detected across every severity rather than through the floor. At a P0/P1
+  # floor the floor pattern hides its mandated P2, and the advisory log line — the one thing
+  # standing between its opinion and a silent clean verdict — would never print, exactly
+  # where a raised floor makes it most likely to be missed. P0-P3 rather than P2 alone
+  # because its prompt also emits a P1 when handed an rb-lite error instead of a diff, and a
+  # P2-only match swallowed that too. Built by the same function so the two cannot drift.
+  SKEPTIC_FINDINGS_PATTERN=$(build_findings_pattern 0-3)
   ACTIONABLE_FINDINGS_SEVERITIES=$actionable_findings_severities
   if [[ -n $implement_timeout || -n $reviewer_timeout ]]; then
     local timeout_message
@@ -1193,12 +1240,47 @@ run_command() {
   if [[ -n $max_production_lines ]]; then
     log_msg "production line budget: $max_production_lines (excluding: ${BUDGET_EXCLUDES[*]})"
   fi
-  # A raised floor silences the DEFECT reviewers' P2s, which is the whole of what it does
-  # now: the skeptic is advisory at every floor, so raising it no longer trades away the
-  # panel's counter-pressure. Naming that keeps the flag honest for anyone who reads the
-  # older advice to "use P2 to keep the skeptic".
+  # A raised floor silences the DEFECT reviewers' lower severities, which is the whole of
+  # what it does now that the built-in skeptic is matched off-floor. Named exactly: a P0
+  # floor drops P1 as well as P2, and an ignored finding reaches the implementer only if
+  # some OTHER finding keeps that round alive — if it is the only one, the run exits clean
+  # and nobody ever reads it. The skeptic clause is conditional on --no-skeptic alone: a
+  # supplied gating panel still gets skeptics, so it is only their absence that makes the
+  # reassurance false.
+  # Upgrade path: before the split, the documented way to keep counter-pressure with a custom
+  # panel was to paste the skeptic into .rb-lite-reviewers. That line is now a GATING reviewer
+  # -- it starts rounds, and with the defect reviewers clean it drives the run to exit 13. The
+  # split cannot fix a file already on disk, so say so. At preflight, not from load_reviewers:
+  # there it fired after round 1's implementer had already run (up to --implement-timeout of
+  # work) and then again every round.
+  #
+  # A LOOSE guess, deliberately warning-only. It matches the marker the documented 0.4.x
+  # skeptic prompt carries, so it catches a verbatim paste and misses a reworded or
+  # script-wrapped skeptic; it can also flag a defect reviewer that merely mentions the word.
+  # An error would break that panel for a guess, so it only ever advises.
+  # NOT gated on --no-skeptic, and that is the whole point. --no-skeptic stops the SKEPTICS
+  # file from being read; the reviewers file is read unconditionally either way. So a 0.4.x
+  # skeptic pasted into .rb-lite-reviewers still runs as a GATING reviewer under --no-skeptic
+  # -- the one case where the user believes they have turned skeptics off and has not. Gating
+  # the warning on the flag suppressed it exactly there, and the README promises it
+  # unconditionally.
+  # Comment and blank lines excluded, matching read_reviewer_file: the warning asserts that a
+  # GATING REVIEWER exists, and the loader never runs a commented line. Without this the
+  # documented remedy makes the warning permanent -- comment the old skeptic out, or leave a
+  # note saying where it went, and every subsequent run reports a reviewer that is not there.
+  if [[ -f $reviewers_file ]] \
+     && grep -v -E '^[[:space:]]*(#|$)' "$reviewers_file" 2>/dev/null \
+        | grep -Fq -- 'OVER-SPECIFICATION'; then
+    log_msg "WARNING: a line in $reviewers_file looks like a skeptic (it mentions OVER-SPECIFICATION). Listed there it is a GATING reviewer: its findings start rounds and can reach consensus_failure (13). Move it to $skeptics_file to make it advisory. This is a guess -- a reworded skeptic is not detected."
+  fi
+
   if [[ $min_findings_severity == P0 || $min_findings_severity == P1 ]]; then
-    log_msg "WARNING: --min-findings-severity $min_findings_severity ignores P2 findings from the defect reviewers; they are still written to the run dir and still reach the implementer, but cannot trigger a round. The skeptical reviewer is advisory at every floor and is unaffected by this setting."
+    local ignored_severities=P2 skeptic_note=""
+    [[ $min_findings_severity == P0 ]] && ignored_severities="P1 and P2"
+    if [[ ${NO_SKEPTIC:-0} != 1 ]]; then
+      skeptic_note=" Skeptical reviewers are matched off-floor and are unaffected by this setting."
+    fi
+    log_msg "WARNING: --min-findings-severity $min_findings_severity ignores $ignored_severities findings from the defect reviewers. They are still written to the run dir, but cannot trigger a round, and reach the implementer only in a round some other finding keeps alive.$skeptic_note"
   fi
   [[ -z $implement_timeout ]] || log_msg "implementer iteration timeout: ${implement_timeout}s"
   [[ -z $reviewer_timeout ]] || log_msg "reviewer timeout: ${reviewer_timeout}s"
@@ -1261,7 +1343,7 @@ run_command() {
       fi
     fi
 
-    if ! run_review_panel "$root" "$round" "$base" "$reviewers_file" "$reviewer_timeout"; then
+    if ! run_review_panel "$root" "$round" "$base" "$reviewers_file" "$reviewer_timeout" "$skeptics_file"; then
       die_with "$EXIT_REVIEW_PANEL" "review panel failed with exit $REVIEW_PANEL_FAILURE_EXIT; see $RUN_DIR"
     fi
 
@@ -1343,7 +1425,7 @@ SUMMARY_DEFERRED_TOTAL=0
 SUMMARY_PRODUCTION_LINES=0
 SUMMARY_MAX_PRODUCTION_LINES=
 NO_SKEPTIC=0
-SKEPTIC_REVIEWER_INDEX=
+GATING_REVIEWER_COUNT=0
 ROUND_ACCEPTED=0
 ROUND_DECLINED=0
 ROUND_DEFERRED=0
