@@ -1264,8 +1264,13 @@ run_command() {
   # -- the one case where the user believes they have turned skeptics off and has not. Gating
   # the warning on the flag suppressed it exactly there, and the README promises it
   # unconditionally.
+  # Comment and blank lines excluded, matching read_reviewer_file: the warning asserts that a
+  # GATING REVIEWER exists, and the loader never runs a commented line. Without this the
+  # documented remedy makes the warning permanent -- comment the old skeptic out, or leave a
+  # note saying where it went, and every subsequent run reports a reviewer that is not there.
   if [[ -f $reviewers_file ]] \
-     && grep -Fq -- 'OVER-SPECIFICATION' "$reviewers_file" 2>/dev/null; then
+     && grep -v -E '^[[:space:]]*(#|$)' "$reviewers_file" 2>/dev/null \
+        | grep -Fq -- 'OVER-SPECIFICATION'; then
     log_msg "WARNING: a line in $reviewers_file looks like a skeptic (it mentions OVER-SPECIFICATION). Listed there it is a GATING reviewer: its findings start rounds and can reach consensus_failure (13). Move it to $skeptics_file to make it advisory. This is a guess -- a reworded skeptic is not detected."
   fi
 

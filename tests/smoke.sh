@@ -2720,6 +2720,28 @@ test_the_legacy_skeptic_warning_survives_no_skeptic() {
   assert_file_contains "$run_dir/log.txt" 'looks like a skeptic'
 }
 
+# The warning asserts a gating reviewer EXISTS, so it must read the file the way the loader
+# does. Commenting the old line out is the remedy the README suggests, and a bare grep over
+# the whole file made that remedy warn forever about a reviewer that no longer runs.
+test_the_legacy_skeptic_warning_ignores_comment_lines() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/legacy-skeptic-commented"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings\n"'
+  printf '%s\n' \
+    '# moved to .rb-lite-skeptics: legacy-skeptic -p "... OVER-SPECIFICATION ..."' \
+    fake-reviewer >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" 'printf "No findings.\n"'
+
+  run_rb_lite "$repo" run --task "commented legacy line" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  if grep -q 'looks like a skeptic' "$run_dir/log.txt"; then
+    fail "a commented-out skeptic line is not a gating reviewer"
+  fi
+}
+
 test_defect_findings_still_extend_the_run_with_a_skeptic_present() {
   local repo run_dir
   repo=$(new_repo)
@@ -3261,6 +3283,7 @@ test_skeptics_file_flag_targets_the_advisory_axis
 test_skeptics_file_env_targets_the_advisory_axis
 test_a_skeptic_left_in_the_gating_file_is_flagged
 test_the_legacy_skeptic_warning_survives_no_skeptic
+test_the_legacy_skeptic_warning_ignores_comment_lines
 test_advisory_only_message_names_the_floor_not_an_absence
 test_budget_refuses_an_undiffable_base
 test_budget_charges_a_rename_to_its_destination_path
