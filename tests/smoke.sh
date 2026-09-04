@@ -2537,6 +2537,33 @@ printf "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result
   fi
 }
 
+# --help and the README both promise --no-skeptic drops the built-in skeptic AND any skeptic
+# supplied in a file. Only the built-in half was pinned, so the flag could have quietly
+# started honoring a supplied skeptics file -- the reading of it that a user reaches for the
+# flag to prevent -- with the whole suite still green.
+test_no_skeptic_also_drops_a_supplied_skeptics_file() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/no-skeptic-supplied"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings.\n"'
+  write_fake "$repo" my-skeptic '
+mkdir -p .rb-lite
+: >.rb-lite/supplied-skeptic-ran
+printf "P2: CUT the retry wrapper\n"
+'
+  printf '%s\n' fake-reviewer >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" my-skeptic
+
+  run_rb_lite "$repo" run --task "supplied skeptic, skeptics off" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --no-skeptic --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains "$run_dir/log.txt" 'review panel starting with 1 reviewer\(s\)'
+  if [[ -e "$repo/.rb-lite/supplied-skeptic-ran" ]]; then
+    fail "--no-skeptic must not run a skeptic supplied in a skeptics file"
+  fi
+}
+
 test_skeptic_findings_alone_do_not_extend_the_run() {
   local repo run_dir
   repo=$(new_repo)
@@ -2740,6 +2767,60 @@ test_the_legacy_skeptic_warning_ignores_comment_lines() {
   if grep -q 'looks like a skeptic' "$run_dir/log.txt"; then
     fail "a commented-out skeptic line is not a gating reviewer"
   fi
+}
+
+# Reading the file the way the loader does must not depend on how big the file is. The
+# check was a `grep -v | grep -Fq` pipeline, and the downstream grep exits at its first
+# match: on a reviewers file larger than the pipe buffer the upstream grep is still writing,
+# takes SIGPIPE, and `set -o pipefail` reports the whole pipeline as failed. The warning then
+# vanished on exactly the panels too long to eyeball a pasted skeptic in.
+test_the_legacy_skeptic_warning_survives_a_large_reviewers_file() {
+  local repo run_dir pad
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/legacy-skeptic-large-file"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" legacy-skeptic 'printf "No findings.\n"'
+  write_fake "$repo" fake-reviewer 'printf "No findings.\n"'
+  # Bytes after the match, not line count, are what fills the pipe: the marker is on line 1,
+  # so everything below it still has to be written after the reader has gone. 200k clears the
+  # 64k pipe buffer with room to spare. The padding sits in a trailing shell comment so each
+  # line is long to grep and cheap to run, and it is split across two of them because a
+  # reviewer is exec'd as `bash -c "$line"` -- one 200k line exceeds the per-argument limit
+  # and fails to exec (126) instead of running.
+  pad=$(head -c 100000 /dev/zero | tr '\0' a)
+  printf '%s\n' \
+    'legacy-skeptic -p "Review the diff for OVER-SPECIFICATION, not defects."' \
+    "fake-reviewer # $pad" \
+    "fake-reviewer # $pad" >"$repo/.rb-lite-reviewers"
+  write_skeptics "$repo" 'printf "No findings.\n"'
+
+  run_rb_lite "$repo" run --task "legacy layout, large panel" --max-rounds 1 --max-iters 1 \
+    --implement-cmd 'fake-implementer' --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  assert_file_contains "$run_dir/log.txt" 'looks like a skeptic'
+}
+
+# The loader opens the reviewers file by redirection, so it accepts any name a filesystem
+# does. The warning has to read it the same way: as an awk operand, a name containing `=`
+# before any `/` is taken for a variable assignment, awk falls back to rb-lite's own stdin,
+# and the panel loads while the warning about it silently never fires.
+test_the_legacy_skeptic_warning_reads_a_file_named_like_an_assignment() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/legacy-skeptic-odd-name"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" legacy-skeptic 'printf "No findings.\n"'
+  printf '%s\n' 'legacy-skeptic -p "Review the diff for OVER-SPECIFICATION, not defects."' \
+    >"$repo/reviewers=prod"
+  write_skeptics "$repo" 'printf "No findings.\n"'
+
+  run_rb_lite "$repo" run --task "panel file named like an assignment" --max-rounds 1 \
+    --max-iters 1 --reviewers-file 'reviewers=prod' --implement-cmd 'fake-implementer' \
+    --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  # The panel loaded it, so the warning must have seen the same lines the loader did.
+  assert_file_contains "$run_dir/log.txt" 'review panel starting with 2 reviewer\(s\)'
+  assert_file_contains "$run_dir/log.txt" 'looks like a skeptic'
 }
 
 test_defect_findings_still_extend_the_run_with_a_skeptic_present() {
@@ -3284,6 +3365,9 @@ test_skeptics_file_env_targets_the_advisory_axis
 test_a_skeptic_left_in_the_gating_file_is_flagged
 test_the_legacy_skeptic_warning_survives_no_skeptic
 test_the_legacy_skeptic_warning_ignores_comment_lines
+test_the_legacy_skeptic_warning_survives_a_large_reviewers_file
+test_the_legacy_skeptic_warning_reads_a_file_named_like_an_assignment
+test_no_skeptic_also_drops_a_supplied_skeptics_file
 test_advisory_only_message_names_the_floor_not_an_absence
 test_budget_refuses_an_undiffable_base
 test_budget_charges_a_rename_to_its_destination_path
