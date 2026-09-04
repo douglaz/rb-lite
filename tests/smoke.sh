@@ -2800,6 +2800,29 @@ test_the_legacy_skeptic_warning_survives_a_large_reviewers_file() {
   assert_file_contains "$run_dir/log.txt" 'looks like a skeptic'
 }
 
+# The loader opens the reviewers file by redirection, so it accepts any name a filesystem
+# does. The warning has to read it the same way: as an awk operand, a name containing `=`
+# before any `/` is taken for a variable assignment, awk falls back to rb-lite's own stdin,
+# and the panel loads while the warning about it silently never fires.
+test_the_legacy_skeptic_warning_reads_a_file_named_like_an_assignment() {
+  local repo run_dir
+  repo=$(new_repo)
+  run_dir="$repo/.rb-lite/legacy-skeptic-odd-name"
+  write_fake "$repo" fake-implementer 'printf "noop\n"'
+  write_fake "$repo" legacy-skeptic 'printf "No findings.\n"'
+  printf '%s\n' 'legacy-skeptic -p "Review the diff for OVER-SPECIFICATION, not defects."' \
+    >"$repo/reviewers=prod"
+  write_skeptics "$repo" 'printf "No findings.\n"'
+
+  run_rb_lite "$repo" run --task "panel file named like an assignment" --max-rounds 1 \
+    --max-iters 1 --reviewers-file 'reviewers=prod' --implement-cmd 'fake-implementer' \
+    --run-dir "$run_dir" >/tmp/rb-lite-test.out
+
+  # The panel loaded it, so the warning must have seen the same lines the loader did.
+  assert_file_contains "$run_dir/log.txt" 'review panel starting with 2 reviewer\(s\)'
+  assert_file_contains "$run_dir/log.txt" 'looks like a skeptic'
+}
+
 test_defect_findings_still_extend_the_run_with_a_skeptic_present() {
   local repo run_dir
   repo=$(new_repo)
@@ -3343,6 +3366,7 @@ test_a_skeptic_left_in_the_gating_file_is_flagged
 test_the_legacy_skeptic_warning_survives_no_skeptic
 test_the_legacy_skeptic_warning_ignores_comment_lines
 test_the_legacy_skeptic_warning_survives_a_large_reviewers_file
+test_the_legacy_skeptic_warning_reads_a_file_named_like_an_assignment
 test_no_skeptic_also_drops_a_supplied_skeptics_file
 test_advisory_only_message_names_the_floor_not_an_absence
 test_budget_refuses_an_undiffable_base

@@ -1271,9 +1271,13 @@ run_command() {
   # One awk rather than `grep -v | grep -Fq`: the downstream grep exits at its first match,
   # so on a file past the pipe buffer the upstream one took SIGPIPE and pipefail read the
   # whole check as false -- losing the warning on precisely the panels too long to eyeball.
+  # Redirected, not passed as an operand: awk reads an operand containing `=` before any `/`
+  # as a variable assignment, so a panel at `reviewers=prod` would silently become a read of
+  # rb-lite's own stdin. `read_reviewer_file` redirects and loads that file happily, so an
+  # operand here would warn on a strictly narrower set of files than the loader accepts.
   if [[ -f $reviewers_file ]] \
      && awk '!/^[[:space:]]*(#|$)/ && index($0, "OVER-SPECIFICATION") { found = 1; exit }
-             END { exit !found }' "$reviewers_file" 2>/dev/null; then
+             END { exit !found }' <"$reviewers_file" 2>/dev/null; then
     log_msg "WARNING: a line in $reviewers_file looks like a skeptic (it mentions OVER-SPECIFICATION). Listed there it is a GATING reviewer: its findings start rounds and can reach consensus_failure (13). Move it to $skeptics_file to make it advisory. This is a guess -- a reworded skeptic is not detected."
   fi
 
